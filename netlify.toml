@@ -1,0 +1,21 @@
+[build]
+  publish = "site"
+
+# Documents are private by definition — keep them out of search engines
+# and out of shared caches even before the edge function runs.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    X-Robots-Tag = "noindex, nofollow"
+
+[[headers]]
+  for = "/files/*"
+  [headers.values]
+    Cache-Control = "private, no-store"
+
+# Single-page behaviour: the MSAL redirect returns to "/" with a hash,
+# which is served by index.html anyway. No rewrite needed for /files/
+# or /api/ — the edge functions claim those paths themselves.
