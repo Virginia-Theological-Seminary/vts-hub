@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "//": "Marks the edge-function sources as ES modules so Node can import them directly for the local dev server and the test harness. Netlify's Deno bundler treats them as ESM regardless; nothing is installed or built from here."
+}

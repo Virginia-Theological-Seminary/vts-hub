@@ -10,6 +10,13 @@
         personal or other-institution Microsoft account cannot sign in.
      2. isAllowed() re-checks the account's address ends @vts.edu, which
         catches guest accounts invited into the tenant.
+
+   Until the Entra app registration exists, a temporary development
+   sign-in stands in for all of that. This file does not implement it
+   and does not know how it works: it asks window.VTSAuth (assets/
+   auth-client.js) who is signed in, and renders. Whichever provider
+   answered, what arrives here is the same identity object, and the
+   hub's own code below is unchanged.
    ------------------------------------------------------------------ */
 
 (function () {
@@ -27,6 +34,11 @@
   let pca = null;
   let account = null;
   let previewMode = false;
+
+  /* Whoever is signed in, however they signed in. Set from the auth
+     layer under the development provider, and from the MSAL account
+     under Entra. */
+  let identity = null;
 
   /* ---------------- helpers ---------------- */
 
@@ -110,7 +122,11 @@
         excluded.join("; ") + ".";
     }
 
-    el("user-name").textContent = previewMode ? "Preview" : emailOf(account);
+    el("user-name").textContent = previewMode
+      ? "Preview"
+      : identity
+      ? identity.displayName || identity.email
+      : emailOf(account);
     el("preview-banner").hidden = !previewMode;
     el("signout").hidden = previewMode;
 
@@ -121,6 +137,35 @@
   /* ---------------- sign-in flow ---------------- */
 
   async function start() {
+    /* Ask the auth layer who is signed in. Under the temporary
+       development provider this is the whole answer and MSAL is never
+       reached; under Entra it reports mode "entra" and the existing
+       flow below runs untouched. */
+    const auth = window.VTSAuth ? await window.VTSAuth.context() : null;
+
+    if (auth && auth.mode === "development") {
+      /* The long-standing "/?preview" affordance. protect-app.js has
+         already decided whether to serve this page at all, so reaching
+         here with ?preview means the server permitted it. */
+      if (new URLSearchParams(window.location.search).has("preview")) {
+        previewMode = true;
+        render();
+        return;
+      }
+
+      if (auth.authenticated) {
+        identity = auth.user;
+        render();
+        return;
+      }
+
+      /* protect-app.js redirects unauthenticated requests before the
+         page is served; this catches the remaining case of a page
+         restored from cache after the session ended. */
+      goToLogin();
+      return;
+    }
+
     if (!isConfigured) {
       // Convenience while the site is being reviewed: /?preview goes
       // straight in. Guarded by isConfigured, so the moment real
@@ -199,9 +244,15 @@
     }
   }
 
+  function goToLogin() {
+    const next = encodeURIComponent(window.location.pathname + window.location.search);
+    window.location.replace("/login?next=" + next);
+  }
+
   /* ---------------- wiring ---------------- */
 
   el("signin").addEventListener("click", () => {
+    if (!pca) return;
     pca.loginRedirect({
       scopes: ["User.Read"],
       // Ask Entra to reject non-vts.edu accounts before the password step.
@@ -211,7 +262,23 @@
   });
 
   el("signout").addEventListener("click", () => {
-    pca.logoutRedirect({ account: account });
+    /* Entra sessions are ended at Microsoft; development sessions are
+       ended by destroying the cookie. Either way the user lands on
+       /login and the hub is no longer reachable by pressing Back —
+       protect-app.js serves this page no-store. */
+    if (pca && account) {
+      pca.logoutRedirect({ account: account });
+      return;
+    }
+    if (window.VTSAuth) window.VTSAuth.signOut("/login");
+  });
+
+  /* A page restored from the back/forward cache does not re-run start(),
+     so the session is re-checked on show. Without this, Back after Sign
+     out could redisplay the hub from memory. */
+  window.addEventListener("pageshow", async (event) => {
+    if (!event.persisted || previewMode || !window.VTSAuth) return;
+    if (identity && !(await window.VTSAuth.session())) goToLogin();
   });
 
   el("preview").addEventListener("click", () => {

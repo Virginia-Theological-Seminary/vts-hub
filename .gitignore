@@ -1,0 +1,11 @@
+# Real environment values never go to GitHub — only .env.example does.
+.env
+.env.*
+!.env.example
+
+# Netlify CLI
+.netlify/
+
+node_modules/
+.DS_Store
+Thumbs.db

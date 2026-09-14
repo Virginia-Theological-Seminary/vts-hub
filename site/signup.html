@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Create an account — VTS Hub</title>
+<meta name="theme-color" content="#293891">
+<link rel="icon" href="assets/favicon.png" sizes="180x180">
+<link rel="apple-touch-icon" href="assets/favicon.png">
+<link rel="stylesheet" href="assets/styles.css">
+<link rel="stylesheet" href="assets/auth.css">
+</head>
+<body class="gate">
+
+<div class="gate-card auth-card">
+  <img class="gate-logo" src="assets/logo-full.jpg"
+       alt="Virginia Theological Seminary" width="1210" height="1029">
+
+  <h1>Create your VTS Hub account</h1>
+  <p class="gate-sub">
+    Open to Virginia Theological Seminary <strong>@vts.edu</strong>
+    addresses only.
+  </p>
+
+  <p class="auth-alert" id="form-alert" role="alert" hidden></p>
+
+  <form id="signup-form" novalidate>
+    <div class="field-row">
+      <div class="field" id="field-firstName">
+        <label for="firstName">First name</label>
+        <input id="firstName" name="firstName" type="text"
+               autocomplete="given-name" maxlength="60" required>
+        <p class="field-error" id="error-firstName" hidden></p>
+      </div>
+      <div class="field" id="field-lastName">
+        <label for="lastName">Last name</label>
+        <input id="lastName" name="lastName" type="text"
+               autocomplete="family-name" maxlength="60" required>
+        <p class="field-error" id="error-lastName" hidden></p>
+      </div>
+    </div>
+
+    <div class="field" id="field-email">
+      <label for="email">VTS email address</label>
+      <input id="email" name="email" type="email" inputmode="email"
+             autocomplete="username" spellcheck="false"
+             placeholder="you@vts.edu" required>
+      <p class="field-hint">Must end in <strong>@vts.edu</strong>.</p>
+      <p class="field-error" id="error-email" hidden></p>
+    </div>
+
+    <div class="field" id="field-password">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password"
+             autocomplete="new-password" required
+             aria-describedby="pw-rules-label">
+      <p class="field-hint" id="pw-rules-label">Your password needs:</p>
+      <!-- Filled from the server's own rule list, so what is shown here
+           is exactly what the server enforces. -->
+      <ul class="pw-rules" id="pw-rules"></ul>
+      <p class="sr-only" id="pw-status" role="status" aria-live="polite"></p>
+      <p class="field-error" id="error-password" hidden></p>
+    </div>
+
+    <div class="field" id="field-confirmPassword">
+      <label for="confirmPassword">Confirm password</label>
+      <input id="confirmPassword" name="confirmPassword" type="password"
+             autocomplete="new-password" required>
+      <p class="field-error" id="error-confirmPassword" hidden></p>
+    </div>
+
+    <button class="btn-primary" id="submit" type="submit">Create account</button>
+  </form>
+
+  <div class="auth-divider">or</div>
+
+  <!-- Visible, disabled, inert. No handler, no href. -->
+  <button class="btn-microsoft" id="microsoft-btn" type="button" disabled
+          aria-disabled="true" aria-describedby="microsoft-help">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <rect x="2" y="2" width="9.5" height="9.5" fill="#f25022"/>
+      <rect x="12.5" y="2" width="9.5" height="9.5" fill="#7fba00"/>
+      <rect x="2" y="12.5" width="9.5" height="9.5" fill="#00a4ef"/>
+      <rect x="12.5" y="12.5" width="9.5" height="9.5" fill="#ffb900"/>
+    </svg>
+    <span id="microsoft-label">Sign in with Microsoft</span>
+    <span class="chip" id="microsoft-chip">Coming Soon</span>
+  </button>
+  <p class="auth-ms-help" id="microsoft-help">
+    Microsoft Entra authentication is currently being configured by the
+    VTS development team.
+  </p>
+
+  <p class="auth-alt">
+    Already have an account? <a href="/login" id="login-link">Sign in</a>
+  </p>
+</div>
+
+<p class="auth-foot">
+  Virginia Theological Seminary · Internal use only.
+</p>
+
+<script src="assets/auth-client.js"></script>
+<script src="assets/auth-pages.js"></script>
+</body>
+</html>
