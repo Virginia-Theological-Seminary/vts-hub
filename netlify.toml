@@ -43,6 +43,24 @@
   [headers.values]
     Cache-Control = "no-store, must-revalidate"
 
+[[headers]]
+  for = "/forgot.html"
+  [headers.values]
+    Cache-Control = "no-store, must-revalidate"
+
+# The reset page arrives with a one-time token in its query string.
+# no-store plus the site-wide Referrer-Policy keep that token out of
+# caches and out of any Referer header that leaves the site.
+[[headers]]
+  for = "/reset.html"
+  [headers.values]
+    Cache-Control = "no-store, must-revalidate"
+
+[[headers]]
+  for = "/verify.html"
+  [headers.values]
+    Cache-Control = "no-store, must-revalidate"
+
 # Netlify serves /login.html at /login on its own, but the auth layer
 # redirects to these paths by name, so they are declared rather than
 # left to a default that could change.
@@ -54,6 +72,21 @@
 [[redirects]]
   from = "/signup"
   to = "/signup.html"
+  status = 200
+
+[[redirects]]
+  from = "/forgot"
+  to = "/forgot.html"
+  status = 200
+
+[[redirects]]
+  from = "/reset"
+  to = "/reset.html"
+  status = 200
+
+[[redirects]]
+  from = "/verify"
+  to = "/verify.html"
   status = 200
 
 # Single-page behaviour: the MSAL redirect returns to "/" with a hash,

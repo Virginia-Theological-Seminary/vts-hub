@@ -28,6 +28,25 @@ export const MESSAGES = {
   RATE_LIMIT: "Too many attempts. Please wait a few minutes and try again.",
   SESSION_REQUIRED: "Please sign in to continue.",
   CSRF: "Your session expired while this page was open. Please reload and try again.",
+  /* Said whether or not the address has an account, so the form cannot
+     be used to find out which addresses do. */
+  RESET_REQUESTED:
+    "If an account exists for that address, a password reset link has been sent. " +
+    "It expires in 30 minutes.",
+  RESET_INVALID:
+    "This password reset link is invalid or has expired. Please request a new one.",
+  RESET_DONE: "Your password has been updated. Please sign in with your new password.",
+  VERIFY_SENT:
+    "Check your email. We've sent a link to confirm your address; it expires in 24 hours.",
+  VERIFY_RESENT:
+    "If an account exists for that address and is not yet confirmed, a new link has been sent.",
+  VERIFY_INVALID:
+    "This confirmation link is invalid or has expired. Sign in to request a new one.",
+  VERIFY_DONE: "Your email address is confirmed. Please sign in.",
+  EMAIL_UNVERIFIED:
+    "Please confirm your email address first. Check your inbox for the link, or request a new one below.",
+  MAIL_FAILED:
+    "We couldn't send the confirmation email right now. Please try again in a few minutes.",
 };
 
 /* Password policy, stated once so the sign-up form can render exactly

@@ -144,6 +144,49 @@
       });
     },
 
+    /* Asks for a reset link. The answer is the same whether or not the
+       address has an account — see the server for why. */
+    async forgotPassword(fields) {
+      await ensureCsrf();
+      return call("/api/auth/forgot", {
+        method: "POST",
+        body: { email: fields.email },
+      });
+    },
+
+    /* Redeems a reset link with a new password. The token travels in
+       the body, never the query string of this request. */
+    async resetPassword(fields) {
+      await ensureCsrf();
+      return call("/api/auth/reset", {
+        method: "POST",
+        body: {
+          token: fields.token,
+          password: fields.password,
+          confirmPassword: fields.confirmPassword,
+        },
+      });
+    },
+
+    /* "Send the confirmation link again." Same answer whether or not the
+       address has an account. */
+    async resendVerification(fields) {
+      await ensureCsrf();
+      return call("/api/auth/resend", {
+        method: "POST",
+        body: { email: fields.email },
+      });
+    },
+
+    /* Redeems a confirmation link. */
+    async verifyEmail(fields) {
+      await ensureCsrf();
+      return call("/api/auth/verify", {
+        method: "POST",
+        body: { token: fields.token },
+      });
+    },
+
     /* Ends the session server-side, then leaves by replacing the history
        entry rather than pushing one, so Back cannot return to the
        authenticated page. The hub page is also served no-store, so

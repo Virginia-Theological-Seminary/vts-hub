@@ -1,8 +1,8 @@
 /* ------------------------------------------------------------------
    VTS Hub — sign-in and sign-up form behaviour
    ------------------------------------------------------------------
-   Drives both login.html and signup.html; which one is decided by the
-   form that is present on the page.
+   Drives login.html, signup.html, forgot.html, reset.html and
+   verify.html; which one is decided by the form present on the page.
 
    Everything here is convenience: catching a gmail.com address before
    the round trip, ticking off password rules as they are met, saying
@@ -20,12 +20,23 @@
 
   var el = function (id) { return document.getElementById(id); };
 
-  var loginForm = el("login-form");
-  var signupForm = el("signup-form");
-  var form = loginForm || signupForm;
+  var form =
+    el("login-form") || el("signup-form") || el("forgot-form") ||
+    el("reset-form") || el("verify-form");
   if (!form) return;
 
-  var isSignup = Boolean(signupForm);
+  /* "login" | "signup" | "forgot" | "reset" | "verify" */
+  var mode = form.id.replace(/-form$/, "");
+  var isSignup = mode === "signup";
+  var wantsNewPassword = mode === "signup" || mode === "reset";
+  var hasEmail = mode !== "reset" && mode !== "verify";
+  var usesLinkToken = mode === "reset" || mode === "verify";
+
+  /* The one-time token from a reset or confirmation link, held in
+     memory only. It is read from the URL once and the URL is then
+     rewritten without it, so it is not left in the address bar, the
+     history, or anything that copies the location. */
+  var linkToken = "";
   var submitButton = el("submit");
   var alertBox = el("form-alert");
   var passwordRules = [];
@@ -44,6 +55,8 @@
     MISMATCH: "Passwords do not match.",
     PASSWORD_REQUIRED: "Please choose a password.",
     NAME_REQUIRED: "Please enter your first and last name.",
+    RESET_DONE: "Your password has been updated. Please sign in with your new password.",
+    VERIFY_DONE: "Your email address is confirmed. Please sign in.",
   };
 
   function showAlert(message, kind) {
@@ -177,6 +190,9 @@
     clearFieldErrors();
     var firstBad = null;
 
+    /* The confirmation page is a single button. */
+    if (mode === "verify") return null;
+
     if (isSignup) {
       if (!el("firstName").value.trim() || !el("lastName").value.trim()) {
         setFieldError("firstName", MESSAGES.NAME_REQUIRED);
@@ -184,21 +200,26 @@
       }
     }
 
-    var emailProblem = localEmailProblem(el("email").value);
-    if (emailProblem) {
-      setFieldError("email", emailProblem);
-      firstBad = firstBad || "email";
+    if (hasEmail) {
+      var emailProblem = localEmailProblem(el("email").value);
+      if (emailProblem) {
+        setFieldError("email", emailProblem);
+        firstBad = firstBad || "email";
+      }
     }
+
+    /* The forgot form asks for nothing but an address. */
+    if (mode === "forgot") return firstBad;
 
     if (!el("password").value) {
       setFieldError("password", MESSAGES.PASSWORD_REQUIRED);
       firstBad = firstBad || "password";
-    } else if (isSignup && !updatePasswordRules()) {
+    } else if (wantsNewPassword && !updatePasswordRules()) {
       setFieldError("password", "Your password does not meet all of the requirements below.");
       firstBad = firstBad || "password";
     }
 
-    if (isSignup && el("password").value !== el("confirmPassword").value) {
+    if (wantsNewPassword && el("password").value !== el("confirmPassword").value) {
       setFieldError("confirmPassword", MESSAGES.MISMATCH);
       firstBad = firstBad || "confirmPassword";
     }
@@ -208,15 +229,82 @@
 
   /* ---------------- submission ---------------- */
 
-  function setBusy(busy, label) {
+  var LABELS = {
+    login: ["Sign in", "Signing in…"],
+    signup: ["Create account", "Creating account…"],
+    forgot: ["Send reset link", "Sending…"],
+    reset: ["Update password", "Updating…"],
+    verify: ["Confirm my email address", "Confirming…"],
+  };
+
+  function setBusy(busy) {
     submitting = busy;
     submitButton.disabled = busy;
     submitButton.classList.toggle("is-busy", busy);
-    submitButton.textContent = busy
-      ? label
-      : isSignup
-      ? "Create account"
-      : "Sign in";
+    submitButton.textContent = LABELS[mode][busy ? 1 : 0];
+  }
+
+  /* Where each form sends its fields. */
+  async function send() {
+    if (mode === "forgot") {
+      return window.VTSAuth.forgotPassword({ email: el("email").value });
+    }
+    if (mode === "reset") {
+      return window.VTSAuth.resetPassword({
+        token: linkToken,
+        password: el("password").value,
+        confirmPassword: el("confirmPassword").value,
+      });
+    }
+    if (mode === "verify") {
+      return window.VTSAuth.verifyEmail({ token: linkToken });
+    }
+    var fields = { email: el("email").value, password: el("password").value };
+    if (isSignup) {
+      fields.firstName = el("firstName").value;
+      fields.lastName = el("lastName").value;
+      fields.confirmPassword = el("confirmPassword").value;
+      return window.VTSAuth.signUp(fields);
+    }
+    fields.next = safeNext();
+    return window.VTSAuth.signIn(fields);
+  }
+
+  /* The "we sent you a link" state, shared by forgot and sign-up. Where
+     to look for the link depends on how mail leaves the site; the server
+     says which, so this page never guesses. */
+  function showSent(data) {
+    form.hidden = true;
+    var sent = el("sent");
+    var message = el("sent-message");
+    var hint = el("sent-hint");
+    if (message) message.textContent = data.message || "";
+
+    if (hint) {
+      hint.textContent = "";
+      if (data.delivery === "outbox") {
+        hint.appendChild(document.createTextNode("Local development: the message is in the "));
+        var link = document.createElement("a");
+        link.href = "/__dev/outbox";
+        link.textContent = "dev outbox";
+        hint.appendChild(link);
+        hint.appendChild(document.createTextNode("."));
+        hint.hidden = false;
+      } else if (data.delivery === "log") {
+        hint.textContent =
+          "While Microsoft Entra sign-in is being configured, reset links are " +
+          "delivered through the VTS development team. Contact them if it does not arrive.";
+        hint.hidden = false;
+      }
+    }
+    if (sent) sent.hidden = false;
+  }
+
+  function showDeadLink() {
+    form.hidden = true;
+    alertBox.hidden = true;
+    var noToken = el("no-token");
+    if (noToken) noToken.hidden = false;
   }
 
   form.addEventListener("submit", async function (event) {
@@ -230,39 +318,44 @@
       return;
     }
 
-    setBusy(true, isSignup ? "Creating account…" : "Signing in…");
-
-    var fields = {
-      email: el("email").value,
-      password: el("password").value,
-    };
-    if (isSignup) {
-      fields.firstName = el("firstName").value;
-      fields.lastName = el("lastName").value;
-      fields.confirmPassword = el("confirmPassword").value;
-    } else {
-      fields.next = safeNext();
-    }
-
-    var result = isSignup
-      ? await window.VTSAuth.signUp(fields)
-      : await window.VTSAuth.signIn(fields);
+    setBusy(true);
+    var result = await send();
 
     if (result.ok) {
-      /* replace(), not assign(): the sign-in page should not be sitting
-         in history behind the hub. */
+      if (mode === "forgot" || (mode === "signup" && result.data.verification === "sent")) {
+        setBusy(false);
+        showSent(result.data);
+        return;
+      }
+      /* replace(), not assign(): none of these pages should be sitting
+         in history behind the page that follows them. */
       window.location.replace(result.data.next || safeNext() || "/");
       return;
     }
 
     setBusy(false);
 
+    /* A dead link cannot be fixed by trying again on this page. */
+    if (result.code === "RESET_INVALID" || result.code === "VERIFY_INVALID") {
+      showDeadLink();
+      return;
+    }
+
+    /* Right password, unconfirmed address: offer to send the link again
+       for the address they just typed. */
+    if (result.code === "EMAIL_UNVERIFIED") {
+      showAlert(result.message);
+      var resend = el("resend");
+      if (resend) resend.hidden = false;
+      return;
+    }
+
     if (result.field) setFieldError(result.field, result.message);
     showAlert(result.message);
 
     if (result.code === "ACCOUNT_EXISTS") {
       focusField("email");
-    } else if (result.field) {
+    } else if (result.field && el(result.field)) {
       focusField(result.field);
     }
 
@@ -272,6 +365,25 @@
       if (password) password.value = "";
     }
   });
+
+  /* "Send the confirmation link again" — only ever shown after a
+     correct password on an unconfirmed account. */
+  var resendButton = el("resend-btn");
+  if (resendButton) {
+    resendButton.addEventListener("click", async function () {
+      resendButton.disabled = true;
+      var result = await window.VTSAuth.resendVerification({ email: el("email").value });
+      var hint = el("resend-hint");
+      if (hint) {
+        hint.textContent = result.ok
+          ? result.data.message +
+            (result.data.delivery === "outbox" ? " (Local development: see the dev outbox.)" : "")
+          : result.message;
+        hint.hidden = false;
+      }
+      if (!result.ok) resendButton.disabled = false;
+    });
+  }
 
   /* Clear a field's error as soon as the user starts fixing it. */
   ["firstName", "lastName", "email", "password", "confirmPassword"].forEach(function (name) {
@@ -336,22 +448,72 @@
       submitButton.disabled = true;
     }
 
-    /* Password sign-in is a provider capability, not a given. */
-    if (context.configured && ((isSignup && !context.passwordSignUp) ||
-        (!isSignup && !context.passwordSignIn))) {
+    /* Each of these is a provider capability, not a given. Under Entra
+       every password form goes away, and so does the link to one. */
+    var reset = context.passwordReset || {};
+    var verification = context.emailVerification || {};
+    var allowed = {
+      login: context.passwordSignIn,
+      signup: context.passwordSignUp,
+      forgot: reset.available,
+      reset: reset.available,
+      verify: verification.required,
+    }[mode];
+
+    if (context.configured && !allowed) {
       form.hidden = true;
       showAlert(context.notice || "Please sign in with Microsoft.");
     }
+
+    var forgotLink = el("forgot-link");
+    if (forgotLink && !reset.available) forgotLink.hidden = true;
+  }
+
+  /* The reset and confirmation pages are only useful with a token. It
+     is taken from the URL exactly once, then the URL is rewritten
+     without it. */
+  function takeLinkToken() {
+    var token = "";
+    try {
+      token = new URLSearchParams(window.location.search).get("token") || "";
+    } catch (err) {
+      token = "";
+    }
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    return token;
   }
 
   (async function start() {
     /* One request, not two: the context already says whether anyone is
        signed in, so asking the session endpoint as well would only add a
        round trip and an expected 401 in the console. */
+    if (usesLinkToken) {
+      linkToken = takeLinkToken();
+      if (!linkToken) showDeadLink();
+    }
+
+    /* Back from a successful reset or confirmation: say so, once. */
+    if (mode === "login") {
+      try {
+        var arrived = new URLSearchParams(window.location.search);
+        if (arrived.has("reset")) showAlert(MESSAGES.RESET_DONE, "success");
+        if (arrived.has("verified")) showAlert(MESSAGES.VERIFY_DONE, "success");
+        if (arrived.has("reset") || arrived.has("verified")) {
+          window.history.replaceState(null, "", window.location.pathname);
+        }
+      } catch (err) {
+        /* nothing to show */
+      }
+    }
+
     var context = await window.VTSAuth.context(true);
 
-    /* Already signed in? Then this page has nothing to ask. */
-    if (context && context.authenticated) {
+    /* Already signed in? Then this page has nothing to ask. (Not on the
+       token pages: someone may be resetting from a signed-in browser,
+       and the reset clears that session when it succeeds.) */
+    if (context && context.authenticated && !usesLinkToken) {
       window.location.replace(safeNext() || "/");
       return;
     }
