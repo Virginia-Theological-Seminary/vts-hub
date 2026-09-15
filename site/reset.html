@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Choose a new password — VTS Hub</title>
+<meta name="theme-color" content="#293891">
+<link rel="icon" href="assets/favicon.png" sizes="180x180">
+<link rel="apple-touch-icon" href="assets/favicon.png">
+<link rel="stylesheet" href="assets/styles.css">
+<link rel="stylesheet" href="assets/auth.css">
+</head>
+<body class="gate">
+
+<div class="gate-card auth-card">
+  <img class="gate-logo" src="assets/logo-full.jpg"
+       alt="Virginia Theological Seminary" width="1210" height="1029">
+
+  <h1>Choose a new password</h1>
+  <p class="gate-sub">
+    Pick something you haven't used here before.
+  </p>
+
+  <p class="auth-alert" id="form-alert" role="alert" hidden></p>
+
+  <!-- Shown instead of the form when the link is missing, used, or
+       expired. -->
+  <div id="no-token" hidden>
+    <p class="auth-alert" role="alert">
+      This password reset link is invalid or has expired. Please request a
+      new one.
+    </p>
+    <a class="btn-primary" href="/forgot">Request a new link</a>
+  </div>
+
+  <form id="reset-form" novalidate>
+    <div class="field" id="field-password">
+      <label for="password">New password</label>
+      <input id="password" name="password" type="password"
+             autocomplete="new-password" required
+             aria-describedby="pw-rules-label">
+      <p class="field-hint" id="pw-rules-label">Your password needs:</p>
+      <ul class="pw-rules" id="pw-rules"></ul>
+      <p class="sr-only" id="pw-status" role="status" aria-live="polite"></p>
+      <p class="field-error" id="error-password" hidden></p>
+    </div>
+
+    <div class="field" id="field-confirmPassword">
+      <label for="confirmPassword">Confirm new password</label>
+      <input id="confirmPassword" name="confirmPassword" type="password"
+             autocomplete="new-password" required>
+      <p class="field-error" id="error-confirmPassword" hidden></p>
+    </div>
+
+    <button class="btn-primary" id="submit" type="submit">Update password</button>
+  </form>
+
+  <p class="auth-alt">
+    <a href="/login" id="login-link">Back to sign in</a>
+  </p>
+</div>
+
+<p class="auth-foot">
+  Virginia Theological Seminary · Internal use only.
+</p>
+
+<script src="assets/auth-client.js"></script>
+<script src="assets/auth-pages.js"></script>
+</body>
+</html>

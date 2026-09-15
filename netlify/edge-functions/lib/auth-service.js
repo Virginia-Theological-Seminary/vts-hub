@@ -28,6 +28,7 @@
 
 import { developmentAuth } from "./providers/development-auth.js";
 import { microsoftEntraAuth } from "./providers/entra-auth.js";
+import { findUserByEmail } from "./user-store.js";
 import {
   env,
   serializeCookie,
@@ -107,19 +108,59 @@ export async function readSession(request) {
   if (!secret) return null;
   const token = parseCookies(request)[SESSION_COOKIE];
   if (!token) return null;
-  return verifySession(token, secret);
+
+  const payload = await verifySession(token, secret);
+  if (!payload) return null;
+
+  /* A session issued before the password last changed is refused, so a
+     reset actually ends every session that existed at the time —
+     including one held by whoever made the reset necessary. This is
+     the one place a session check touches the store, and only for
+     development sessions: an Entra session has no local record. */
+  if (payload.provider === "development") {
+    const user = await findUserByEmail(payload.email);
+    if (!user) return null;
+    if (user.passwordChangedAt && payload.iat < user.passwordChangedAt) return null;
+  }
+
+  return payload;
+}
+
+/* The origin used in outgoing links (a password-reset link, for one).
+   VTS_SITE_URL pins it when set; otherwise the request's own origin is
+   used, which on Netlify is the site's canonical address. Pinning is
+   the belt to that braces: it means a spoofed Host header can never
+   put another hostname in a link the site sends. */
+export function siteOrigin(request) {
+  const pinned = env("VTS_SITE_URL");
+  if (pinned) {
+    try {
+      return new URL(pinned).origin;
+    } catch {
+      /* fall through to the request */
+    }
+  }
+  return new URL(request.url).origin;
 }
 
 /* Expiring both cookies with Max-Age=0 is what actually ends the
    session: the token is stateless, so the browser has to be told to
    discard it. Same attributes as when they were set, or the browser
    keeps the originals alongside the blanks. */
-export function clearSessionCookies(request) {
+export function clearSessionCookies(request, { keepCsrf = false } = {}) {
   const secure = isSecureRequest(request);
-  return [
+  const cookies = [
     serializeCookie(SESSION_COOKIE, "", { httpOnly: true, secure, sameSite: "Lax", maxAge: 0 }),
-    serializeCookie(CSRF_COOKIE, "", { httpOnly: false, secure, sameSite: "Lax", maxAge: 0 }),
   ];
+  /* Logout drops the CSRF cookie too — the page is leaving. A password
+     reset keeps it: the browser is staying on the site and about to
+     sign in, and a fresh token would only cost an extra round trip. */
+  if (!keepCsrf) {
+    cookies.push(
+      serializeCookie(CSRF_COOKIE, "", { httpOnly: false, secure, sameSite: "Lax", maxAge: 0 })
+    );
+  }
+  return cookies;
 }
 
 export function issueCsrfCookie(request) {

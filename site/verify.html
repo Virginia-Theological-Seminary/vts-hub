@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Confirm your email — VTS Hub</title>
+<meta name="theme-color" content="#293891">
+<link rel="icon" href="assets/favicon.png" sizes="180x180">
+<link rel="apple-touch-icon" href="assets/favicon.png">
+<link rel="stylesheet" href="assets/styles.css">
+<link rel="stylesheet" href="assets/auth.css">
+</head>
+<body class="gate">
+
+<div class="gate-card auth-card">
+  <img class="gate-logo" src="assets/logo-full.jpg"
+       alt="Virginia Theological Seminary" width="1210" height="1029">
+
+  <h1>Confirm your email address</h1>
+  <p class="gate-sub">
+    One click and your VTS Hub account is ready to use.
+  </p>
+
+  <p class="auth-alert" id="form-alert" role="alert" hidden></p>
+
+  <!-- Shown instead of the form when the link is missing, used, or
+       expired. -->
+  <div id="no-token" hidden>
+    <p class="auth-alert" role="alert">
+      This confirmation link is invalid or has expired. Sign in to request
+      a new one.
+    </p>
+    <a class="btn-primary" href="/login">Go to sign in</a>
+  </div>
+
+  <!-- A button rather than an automatic submit on load: mail scanners
+       (Microsoft Safe Links among them) open links before the recipient
+       does, and a link that confirmed itself on GET would be spent by
+       the scanner. Nothing happens until a person presses this. -->
+  <form id="verify-form" novalidate>
+    <button class="btn-primary" id="submit" type="submit">Confirm my email address</button>
+  </form>
+
+  <p class="auth-alt">
+    <a href="/login" id="login-link">Back to sign in</a>
+  </p>
+</div>
+
+<p class="auth-foot">
+  Virginia Theological Seminary · Internal use only.
+</p>
+
+<script src="assets/auth-client.js"></script>
+<script src="assets/auth-pages.js"></script>
+</body>
+</html>
