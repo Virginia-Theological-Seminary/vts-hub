@@ -79,6 +79,16 @@ export const LIMITS = {
   LOGIN_PER_IP: { limit: 200, windowMs: 15 * 60 * 1000 },
   /* Account creation, per client address — same reasoning. */
   SIGNUP_PER_IP: { limit: 30, windowMs: 60 * 60 * 1000 },
+  /* Reset requests, per address asked about. Each one sends a message,
+     so this is also what stops the form being used to flood an inbox. */
+  FORGOT_PER_EMAIL: { limit: 3, windowMs: 15 * 60 * 1000 },
+  FORGOT_PER_IP: { limit: 30, windowMs: 60 * 60 * 1000 },
+  /* Attempts to redeem a reset or verification link. Tokens are 256
+     bits, so guessing is hopeless anyway; this just keeps the endpoints
+     from being cheap to hammer. */
+  RESET_PER_IP: { limit: 30, windowMs: 15 * 60 * 1000 },
+  /* "Send me the confirmation link again", per address. */
+  VERIFY_RESEND_PER_EMAIL: { limit: 3, windowMs: 15 * 60 * 1000 },
 };
 
 /* Netlify sets x-nf-client-connection-ip; the others are fallbacks for

@@ -60,6 +60,67 @@ async function loadEnv() {
    were written to. Shimming it keeps those two files untouched. */
 globalThis.Netlify = { env: { get: (key) => process.env[key] } };
 
+/* ---------------- the dev outbox ---------------- */
+
+/* lib/mailer.js delivers into this array when it is present — the way
+   Mailpit or MailHog would catch outgoing mail on a developer's machine.
+   /__dev/outbox shows it. Only this file installs the array, and this
+   file is never deployed, so the page cannot exist on a real site.
+
+   Installed after .env is read (see the start section), and skipped
+   when VTS_MAIL_OUTBOX=false — which lets a Resend key in .env send
+   real mail from the laptop, to check the provider before deploying. */
+
+const esc = (s) =>
+  String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
+
+/* Turns a bare URL in message text into a link, escaping everything
+   else. Message text is built from user-supplied names, so it is
+   treated as untrusted even here. */
+function linkify(text) {
+  return esc(text).replace(/https?:\/\/[^\s<]+/g, (url) => `<a href="${url}">${url}</a>`);
+}
+
+function outboxPage(url) {
+  const messages = globalThis.__vtsDevOutbox || [];
+  const off = !Array.isArray(globalThis.__vtsDevOutbox);
+
+  if (url.searchParams.has("json")) {
+    return new Response(JSON.stringify(messages), {
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    });
+  }
+
+  const items = off
+    ? `<p class="empty">The outbox is off (VTS_MAIL_OUTBOX=false) — mail is going out for real.</p>`
+    : messages.length
+    ? [...messages].reverse().map((m) => `
+        <article>
+          <header><strong>${esc(m.subject)}</strong><span>to ${esc(m.to)} · ${esc(m.sentAt)}</span></header>
+          <pre>${linkify(m.text)}</pre>
+        </article>`).join("")
+    : `<p class="empty">Nothing yet. Use <a href="/forgot">Forgot password?</a> on the sign-in page.</p>`;
+
+  return new Response(
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+     <title>Dev outbox — VTS Hub</title>
+     <style>
+       body{font:15px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif;max-width:44rem;margin:5vh auto;padding:0 1.5rem;color:#1b1d21;background:#f6f7f9}
+       h1{font-size:20px;color:#293891;margin:0 0 4px} .sub{color:#6b7280;font-size:13.5px;margin:0 0 22px}
+       article{background:#fff;border:1px solid #e2e5ea;border-radius:10px;padding:14px 16px;margin-bottom:14px}
+       header{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:13.5px;margin-bottom:8px}
+       header span{color:#6b7280} pre{white-space:pre-wrap;word-break:break-word;margin:0;font:13.5px/1.5 ui-monospace,Menlo,Consolas,monospace}
+       a{color:#293891} .empty{color:#6b7280}
+     </style>
+     <h1>Dev outbox</h1>
+     <p class="sub">Mail the site tried to send this run. Local only — this page does not exist on a deployed site.</p>
+     ${items}`,
+    { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } }
+  );
+}
+
 /* ---------------- static files ---------------- */
 
 const TYPES = {
@@ -86,9 +147,12 @@ function resolveInSite(pathname) {
 }
 
 async function serveStatic(pathname) {
-  /* The two redirects declared in netlify.toml. */
+  /* The redirects declared in netlify.toml. */
   if (pathname === "/login") pathname = "/login.html";
   if (pathname === "/signup") pathname = "/signup.html";
+  if (pathname === "/forgot") pathname = "/forgot.html";
+  if (pathname === "/reset") pathname = "/reset.html";
+  if (pathname === "/verify") pathname = "/verify.html";
   if (pathname === "/" || pathname.endsWith("/")) pathname += "index.html";
 
   const file = resolveInSite(pathname);
@@ -124,6 +188,9 @@ const [authApi, protectApp, protectFiles, sessionApi] = [
 async function route(request, url, ip) {
   const context = { ip, next: () => serveStatic(url.pathname) };
 
+  if (url.pathname === "/__dev/outbox") {
+    return outboxPage(url);
+  }
   if (url.pathname.startsWith("/api/auth")) {
     return (await load(authApi)).default(request, context);
   }
@@ -182,6 +249,9 @@ async function send(response, res) {
 
 await loadEnv();
 
+const outboxOn = String(process.env.VTS_MAIL_OUTBOX || "true").toLowerCase() !== "false";
+if (outboxOn) globalThis.__vtsDevOutbox = [];
+
 const port = Number(process.env.PORT || 8888);
 
 const server = http.createServer(async (req, res) => {
@@ -208,5 +278,12 @@ server.listen(port, () => {
   console.log("");
   console.log("  auth     AUTH_MODE=" + process.env.AUTH_MODE + " (temporary development authentication)");
   console.log("  store    in memory — accounts are lost when this process stops");
+  if (outboxOn) {
+    console.log("  mail     captured — read it at http://localhost:" + port + "/__dev/outbox");
+  } else if (process.env.RESEND_API_KEY && process.env.MAIL_FROM) {
+    console.log("  mail     sending for real through Resend, from " + process.env.MAIL_FROM);
+  } else {
+    console.log("  mail     outbox off but Resend not configured — links will print here");
+  }
   console.log("");
 });

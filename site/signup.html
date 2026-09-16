@@ -25,6 +25,13 @@
 
   <p class="auth-alert" id="form-alert" role="alert" hidden></p>
 
+  <!-- Shown in place of the form once the account is created: the
+       address has to be confirmed before it can sign in. -->
+  <div id="sent" hidden>
+    <p class="auth-alert is-success" id="sent-message" role="status"></p>
+    <p class="field-hint" id="sent-hint" hidden></p>
+  </div>
+
   <form id="signup-form" novalidate>
     <div class="field-row">
       <div class="field" id="field-firstName">
