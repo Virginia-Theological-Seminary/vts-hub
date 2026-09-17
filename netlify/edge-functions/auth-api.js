@@ -12,6 +12,10 @@
      POST /api/auth/signup    create a development account
      POST /api/auth/login     exchange credentials for a session cookie
      POST /api/auth/logout    destroy the session
+     POST /api/auth/forgot    send a password-reset link (always "ok")
+     POST /api/auth/reset     redeem a reset link with a new password
+     POST /api/auth/resend    send the email-confirmation link again
+     POST /api/auth/verify    redeem a confirmation link
 
    Every response is no-store JSON. No response on any path contains a
    password, a password hash, or any part of one.
@@ -28,6 +32,7 @@ import {
   checkCsrf,
   describeAuth,
   publicIdentity,
+  siteOrigin,
 } from "./lib/auth-service.js";
 import { sessionSecret } from "./lib/session-token.js";
 import {
@@ -134,26 +139,102 @@ async function handleSignup(request, context) {
     confirmPassword: parsed.body.confirmPassword,
     firstName: parsed.body.firstName,
     lastName: parsed.body.lastName,
+    siteOrigin: siteOrigin(request),
   });
 
   if (!result.ok) {
-    const status = result.code === "ACCOUNT_EXISTS" ? 409 : 400;
+    const status =
+      result.code === "ACCOUNT_EXISTS" ? 409 : result.code === "MAIL_FAILED" ? 502 : 400;
     return fail(status, result.code, result.message, {
       headers: { "x-vts-field": result.field || "" },
     });
   }
 
-  /* Signing up signs you in — but through the same issueSession() path
-     as the login route, with a freshly minted session id. */
-  const session = await issueSession(request, result.user);
-  if (!session) return fail(500, "NOT_CONFIGURED", MESSAGES.SERVER);
-
-  clear("login:" + result.user.email);
-
+  /* No session yet. The account cannot be used until the address is
+     confirmed, and confirming it sends the holder to the sign-in page
+     — which is also where the new password gets proven. */
   return json(
-    { ok: true, user: publicIdentity(session.payload), next: "/" },
-    { status: 201, cookies: session.cookies }
+    {
+      ok: true,
+      user: { email: result.user.email, role: result.user.role },
+      verification: result.verification,
+      message: result.message,
+      delivery: result.delivery,
+    },
+    { status: 201 }
   );
+}
+
+/* "Send me the confirmation link again." Same posture as forgot: the
+   answer never depends on whether the address has an account. */
+async function handleResend(request, context) {
+  const csrf = checkCsrf(request);
+  if (!csrf.ok) return fail(403, "CSRF", csrf.message);
+
+  const ip = clientIp(request, context);
+  const ipGate = hit("forgot-ip:" + ip, LIMITS.FORGOT_PER_IP);
+  if (!ipGate.allowed) {
+    return fail(429, "RATE_LIMITED", MESSAGES.RATE_LIMIT, {
+      headers: { "retry-after": String(ipGate.retryAfterSeconds) },
+    });
+  }
+
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) return fail(400, "BAD_REQUEST", MESSAGES.SERVER);
+
+  const active = provider();
+  if (!active.resendVerification || active.describe().emailVerification?.required === false) {
+    return fail(400, "VERIFY_NOT_SUPPORTED", MESSAGES.SERVER);
+  }
+
+  const emailGate = hit(
+    "resend:" + normalizeEmail(parsed.body.email),
+    LIMITS.VERIFY_RESEND_PER_EMAIL
+  );
+  if (!emailGate.allowed) {
+    return fail(429, "RATE_LIMITED", MESSAGES.RATE_LIMIT, {
+      headers: { "retry-after": String(emailGate.retryAfterSeconds) },
+    });
+  }
+
+  const result = await active.resendVerification({
+    email: parsed.body.email,
+    siteOrigin: siteOrigin(request),
+  });
+  if (!result.ok) {
+    return fail(400, result.code, result.message, {
+      headers: { "x-vts-field": result.field || "" },
+    });
+  }
+  return json({ ok: true, message: result.message, delivery: result.delivery });
+}
+
+async function handleVerify(request, context) {
+  const csrf = checkCsrf(request);
+  if (!csrf.ok) return fail(403, "CSRF", csrf.message);
+
+  const ip = clientIp(request, context);
+  const gate = hit("reset-ip:" + ip, LIMITS.RESET_PER_IP);
+  if (!gate.allowed) {
+    return fail(429, "RATE_LIMITED", MESSAGES.RATE_LIMIT, {
+      headers: { "retry-after": String(gate.retryAfterSeconds) },
+    });
+  }
+
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) return fail(400, "BAD_REQUEST", MESSAGES.SERVER);
+
+  const active = provider();
+  if (!active.verifyEmail) return fail(400, "VERIFY_NOT_SUPPORTED", MESSAGES.VERIFY_INVALID);
+
+  const result = await active.verifyEmail({ token: parsed.body.token });
+  if (!result.ok) {
+    return fail(400, result.code, result.message, {
+      headers: { "x-vts-field": result.field || "" },
+    });
+  }
+
+  return json({ ok: true, message: result.message, next: "/login?verified=1" });
 }
 
 async function handleLogin(request, context) {
@@ -218,6 +299,98 @@ async function handleLogin(request, context) {
   );
 }
 
+async function handleForgot(request, context) {
+  const csrf = checkCsrf(request);
+  if (!csrf.ok) return fail(403, "CSRF", csrf.message);
+
+  const ip = clientIp(request, context);
+  const ipGate = hit("forgot-ip:" + ip, LIMITS.FORGOT_PER_IP);
+  if (!ipGate.allowed) {
+    return fail(429, "RATE_LIMITED", MESSAGES.RATE_LIMIT, {
+      headers: { "retry-after": String(ipGate.retryAfterSeconds) },
+    });
+  }
+
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) return fail(400, "BAD_REQUEST", MESSAGES.SERVER);
+
+  const active = provider();
+  if (!active.supportsPasswordReset) {
+    return fail(
+      400,
+      "RESET_NOT_SUPPORTED",
+      "Passwords are managed in Microsoft 365. Use Microsoft's own password reset."
+    );
+  }
+
+  /* Per-address limit, counted whether or not the address has an
+     account — a limit that only counted real accounts would itself be
+     a way to tell which addresses are real. */
+  const emailGate = hit("forgot:" + normalizeEmail(parsed.body.email), LIMITS.FORGOT_PER_EMAIL);
+  if (!emailGate.allowed) {
+    return fail(429, "RATE_LIMITED", MESSAGES.RATE_LIMIT, {
+      headers: { "retry-after": String(emailGate.retryAfterSeconds) },
+    });
+  }
+
+  const result = await active.requestPasswordReset({
+    email: parsed.body.email,
+    siteOrigin: siteOrigin(request),
+  });
+
+  if (!result.ok) {
+    return fail(400, result.code, result.message, {
+      headers: { "x-vts-field": result.field || "" },
+    });
+  }
+  return json({ ok: true, message: result.message, delivery: result.delivery });
+}
+
+async function handleReset(request, context) {
+  const csrf = checkCsrf(request);
+  if (!csrf.ok) return fail(403, "CSRF", csrf.message);
+
+  const ip = clientIp(request, context);
+  const gate = hit("reset-ip:" + ip, LIMITS.RESET_PER_IP);
+  if (!gate.allowed) {
+    return fail(429, "RATE_LIMITED", MESSAGES.RATE_LIMIT, {
+      headers: { "retry-after": String(gate.retryAfterSeconds) },
+    });
+  }
+
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) return fail(400, "BAD_REQUEST", MESSAGES.SERVER);
+
+  const active = provider();
+  if (!active.supportsPasswordReset) {
+    return fail(400, "RESET_NOT_SUPPORTED", MESSAGES.RESET_INVALID);
+  }
+
+  const result = await active.resetPassword({
+    token: parsed.body.token,
+    password: parsed.body.password,
+    confirmPassword: parsed.body.confirmPassword,
+  });
+
+  if (!result.ok) {
+    return fail(400, result.code, result.message, {
+      headers: { "x-vts-field": result.field || "" },
+    });
+  }
+
+  /* A locked-out account is unlocked by a successful reset, otherwise
+     the person who just proved ownership could not sign in. */
+  clear("login:" + result.email);
+
+  /* Not signed in automatically: the new password is confirmed by
+     using it, and no session is minted from a link that arrived by
+     email. Any cookie this browser holds is cleared for good measure. */
+  return json(
+    { ok: true, message: result.message, next: "/login?reset=1" },
+    { cookies: clearSessionCookies(request, { keepCsrf: true }) }
+  );
+}
+
 /* Logout is deliberately forgiving: it always succeeds and always
    clears the cookies, even without a valid session or a CSRF token.
    Refusing to log someone out is not a security win. */
@@ -267,8 +440,13 @@ export default async (request, context) => {
     if (method === "POST" && route === "signup") return await handleSignup(request, context);
     if (method === "POST" && route === "login") return await handleLogin(request, context);
     if (method === "POST" && route === "logout") return await handleLogout(request);
+    if (method === "POST" && route === "forgot") return await handleForgot(request, context);
+    if (method === "POST" && route === "reset") return await handleReset(request, context);
+    if (method === "POST" && route === "resend") return await handleResend(request, context);
+    if (method === "POST" && route === "verify") return await handleVerify(request, context);
 
-    if (["context", "session", "signup", "login", "logout"].includes(route)) {
+    const known = ["context", "session", "signup", "login", "logout", "forgot", "reset", "resend", "verify"];
+    if (known.includes(route)) {
       return fail(405, "METHOD_NOT_ALLOWED", MESSAGES.SERVER);
     }
     return fail(404, "NOT_FOUND", MESSAGES.SERVER);

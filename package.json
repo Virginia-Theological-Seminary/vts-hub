@@ -1,0 +1,16 @@
+{
+  "name": "vts-hub",
+  "private": true,
+  "description": "VTS Hub — password-protected resource section for vts.edu",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "node dev-server.mjs",
+    "test": "node auth-tests.mjs"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^11.1.0"
+  }
+}

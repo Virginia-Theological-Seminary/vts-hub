@@ -1,34 +1,448 @@
 # VTS Hub
 
-The [VTS Hub](https://hub.vts.edu) is hosted by Ironistic.
+A password-protected section for vts.edu, restricted to Microsoft 365 accounts
+in the **vts.edu** tenant. It replaces the faculty resource board currently on
+`virginiatheological.mycampus-app.com`.
 
-## Contacts
-
-- Natthaphon Foithong <nfoithong@vts.edu> — Main Point of Contact
-- Nicky Burridge <nburridge@vts.edu>
-- Iron Quality <iq@ironistic.com> — Main Ironistic contact
-- Chris Foss <chris@ironistic.com> — Co-Founder
-- Justin Trevorrow <jtrevorrow@ironistic.com> — Technical Contact
+**Sign-in today:** Microsoft Entra is not registered yet, so the hub runs on a
+**temporary development sign-in** — email and password accounts held by the site
+itself, restricted to `@vts.edu` addresses, each confirmed by a link sent to that
+address. It is labelled as temporary wherever it appears in the code, and it is
+designed to be swapped for Entra by changing one environment variable. It can
+also be run for real in the meantime: see [Going live without Entra](#going-live-without-entra).
 
 ---
 
-## Deployment Workflow
+## What still needs doing
 
-Use a simple two-branch workflow with pull requests:
+| # | Item | Who |
+|---|------|-----|
+| 1 | Supply the 12 outstanding links and documents (list below) | VTS |
+| 2 | Check the FY2022–23 HR and Finance documents are still current | HR / Finance |
+| 3 | Register the app in Entra ID and paste two IDs into `site/assets/config.js` | VTS IT |
+| 4 | Set `VTS_SESSION_SECRET` in Netlify | VTS IT / Ian |
+| 5 | Deploy | Ian |
+| 6 | Until 3 is done: verify `vts.edu` in Resend and set the two mail variables (see [Going live](#going-live-without-entra)) | VTS IT / Ian |
+| 7 | Once 3 and 4 are done, set `AUTH_MODE=entra` to retire the temporary sign-in | Ian |
 
-1. Create or update feature work from `Development`.
-2. Open a pull request to merge changes into `Development`.
-3. Review, test, and approve the pull request in `Development`.
-4. When the development branch is ready for production, open a pull request from `Development` into `Main`.
-5. Merge the `Development` → `Main` pull request to deploy the production release.
+**15 of the 27 tiles are live.** The other 12 render as dashed, greyed-out
+cards marked *Still to come*, so nothing looks finished when it isn't:
 
-### Branch Rules
+- Worship — prayer requests link, Links for Worship, policy documents, customaries
+- Finance — check authorization form, travel expense report
+- HR — faculty handbook, Shared Interest Program
+- Systems — Paycom, Brightspace, Populi, Website Editor log-in URLs
 
-- `Development`: active integration branch for new work and validation
-- `Main`: production branch, used for the live site release
+The mycampus hub was never read directly (the browser extension was not
+connected); everything here was built from documents supplied separately.
 
-This keeps changes reviewable and ensures production deployments happen only after approval through a pull request.
+**A note on document currency:** the Staff Handbook, Employee Benefits Manual
+and Travel Policy are all marked FY2022–23. Worth confirming with HR and
+Finance that no newer versions exist before this goes live.
 
-## Additional Information
+---
 
-- [Initial README](setup-init.md)
+## 1. Register the application (VTS IT)
+
+In the [Entra admin centre](https://entra.microsoft.com) → **App registrations**
+→ **New registration**:
+
+- **Name:** VTS Hub
+- **Supported account types:** *Accounts in this organizational directory only
+  (Virginia Theological Seminary only — Single tenant)* ← this is the setting
+  that enforces "@vts.edu only"
+- **Redirect URI:** platform **Single-page application (SPA)**, value = the
+  site's address, e.g. `https://hub.vts.edu/`
+  - Add a second SPA redirect URI for the Netlify preview address while testing.
+
+No client secret is needed, and none should be created — a browser app cannot
+keep one private. Authentication uses authorisation code flow with PKCE.
+
+Under **API permissions**, `User.Read` (delegated) is present by default; that
+is all that is required.
+
+Then copy from the app's **Overview** page into `assets/config.js`:
+
+```js
+tenantId: "…Directory (tenant) ID…",
+clientId: "…Application (client) ID…",
+```
+
+## 2. Set the session secret
+
+In Netlify → **Site configuration → Environment variables**, add:
+
+```
+VTS_SESSION_SECRET = <a long random string>
+```
+
+Generate one with: `openssl rand -base64 48`
+
+This signs the short-lived cookie that authorises document downloads. Without
+it, sign-in still works but documents return "Sign-in required".
+
+## 3. Deploy
+
+Connect the repository to Netlify (*Import from Git*); it publishes `site/`, and
+`netlify.toml` and the edge functions are picked up automatically. Dragging the
+`Website` folder onto Netlify also works for a quick look, but skips the
+dependency install, so the temporary sign-in's accounts would not persist — see
+[Going live without Entra](#going-live-without-entra).
+
+Keep using the **same Netlify site** for redeploys so the URL, the Entra
+redirect URI and the environment variable all stay valid.
+
+---
+
+## Authentication
+
+The site talks to one auth layer and does not know which system is behind it.
+
+```
+VTS Hub
+   |
+   v
+Auth Service                netlify/edge-functions/lib/auth-service.js
+   |
+   +-- DevelopmentAuth      temporary, in use now
+   |
+   +-- MicrosoftEntraAuth   production, not yet switched on
+```
+
+Swapping the two is one environment variable, `AUTH_MODE`. No page, route
+guard or response body refers to how a password is checked or where accounts
+are kept, so nothing in the hub has to change when Entra takes over.
+
+### The temporary development sign-in
+
+**This is not the VTS sign-in system.** It exists so the hub can be built and
+used before IT has finished the Entra app registration. An account created here
+has nothing to do with anyone's real VTS credentials; the Microsoft button on
+the sign-in and sign-up pages says Entra is still being configured.
+
+- `/signup` — create an account. **`@vts.edu` addresses only**; the address is
+  trimmed and lower-cased, then the part after the final `@` must be exactly
+  `vts.edu`. Everything else is refused, including `a@vts.edu@gmail.com` and
+  `user@vts.edu.example.com`.
+- `/login` — sign in. The same domain rule is applied again.
+- Passwords need 8+ characters with an upper-case letter, a lower-case letter,
+  a number and a special character. The form shows the rules the server
+  enforces, because it is sent the server's own list.
+- New accounts get the role `student`. The sign-up form cannot ask for any
+  other role — the request body's `role` field is never read.
+- A new account **cannot sign in until its address is confirmed.** Sign-up sends
+  a one-time link (valid 24 hours) to the address; `/verify` redeems it. This is
+  what stops someone registering as `dean@vts.edu` — the domain rule checks the
+  shape of the address, the link checks that the person can read its mail. The
+  sign-in page offers to send the link again, and completing a password reset
+  confirms the address too, since it proves the same thing.
+- Passwords are hashed with **PBKDF2-HMAC-SHA-256, 210,000 iterations**, with a
+  per-account random salt. Argon2id and bcrypt would both be better, but each
+  needs a native or WASM module that the Netlify Edge runtime could only fetch
+  from a third-party CDN at request time, and this project has no external
+  runtime dependencies. The stored string is tagged with its algorithm and
+  cost, so records upgrade themselves on the next sign-in if that changes.
+
+Every rule above is enforced **on the server**. The browser repeats some of them
+to give a quick, friendly message, but the server re-runs all of them and is
+free to disagree.
+
+### Forgot password
+
+`/forgot` asks for an address and sends a one-time reset link; `/reset` takes
+the link and a new password. The shape is the standard one, because the obvious
+shortcut — enter your email, type a new password — would let anyone who knew an
+address take the account:
+
+- The response to a request is **the same whether or not the address has an
+  account**, so the form cannot be used to find out which addresses are real.
+  Three requests per address per 15 minutes.
+- The link carries 32 random bytes; only their **SHA-256 is stored**, so a copy
+  of the store cannot reset anyone's password. It expires in **30 minutes** and
+  works **once** — a second click, or a replayed link, finds nothing.
+- The reset page takes the token out of the URL on load and rewrites the address
+  bar without it. Page is `no-store`; the site-wide `Referrer-Policy` keeps the
+  token out of any Referer that leaves the site.
+- A typo in the new password does not burn the link — the password is checked
+  before the token is consumed.
+- A successful reset **ends every session that existed at the time**, including
+  one held by whoever made the reset necessary, and clears any sign-in lockout on
+  the address. The user is sent to `/login` to prove the new password by using
+  it; no session is minted from a link that arrived by email.
+
+**How links get to the user** — confirmation and reset alike — is decided in
+`lib/mailer.js`, in this order:
+
+- On the **local dev server**, every message is captured and shown at
+  `/__dev/outbox` (the way Mailpit would). The pages link to it.
+- With **`RESEND_API_KEY` and `MAIL_FROM` set**, mail is sent through
+  [Resend](https://resend.com) over its HTTPS API. Nothing is installed; it is one
+  `fetch()`. See [Going live](#going-live-without-entra) for the setup.
+- **Otherwise**, the message is written to the edge-function log, which site
+  collaborators can read and pass on. Crude, but secure: the link never goes back
+  to the browser that asked for it.
+
+Swapping Resend for another provider is the body of one function. Under Entra
+none of this is used: Microsoft confirms addresses by their existing and handles
+forgotten passwords itself.
+
+One limit worth knowing: `protect-files.js` checks a session's signature and
+expiry only, so a session that existed before a reset can still open a document
+until it expires (8 hours at most). The hub page and every API route refuse it
+immediately. Closing that gap would mean the untouched Entra-era file consulting
+the temporary user store, which is the wrong direction.
+
+### Sessions
+
+Sign-in issues the **same signed HttpOnly cookie** the Entra path already
+issued, in the same format — so `protect-files.js` guards `/files/*` for both
+without a single change. The cookie is `HttpOnly`, `Secure`, `SameSite=Lax`,
+and holds only `userId`, `email`, first and last name, role and expiry. A fresh
+session id is minted on every sign-in, so a planted session cannot be adopted.
+Sign out destroys it and returns to `/login`; the hub is served `no-store`, so
+Back cannot redisplay it.
+
+### The Microsoft button
+
+Visible on both pages, disabled, marked **Coming Soon**, with the explanation
+that Entra is still being configured. It has no click handler and no URL — it
+cannot begin an authentication attempt, and nothing here contacts Microsoft.
+
+### Switching to Entra
+
+Once IT delivers the app registration:
+
+1. Put the tenant and client IDs into `site/assets/config.js` (step 1 above).
+2. Set `AUTH_MODE=entra` in the Netlify environment.
+
+The Microsoft button becomes live, the password form disappears, and
+`DevelopmentAuth` stops answering — it refuses both password paths under the
+Entra provider, so no residue of the temporary system remains usable. To delete
+it entirely, remove `lib/providers/development-auth.js`, `lib/user-store.js`,
+`lib/password.js`, `site/login.html`, `site/signup.html` and their two assets;
+nothing outside the auth layer refers to any of them.
+
+### Where the development accounts live
+
+Netlify Blobs, when it is available — no database to provision. The package is
+listed in `package.json` and imported statically, so a Git-connected deploy
+installs and bundles it. When Blobs is not available (the local dev server, or a
+site deployed without a build), the store falls back to memory and **logs a
+warning**, which means accounts do not survive a restart. Check the edge-function
+log after the first deploy: it should not mention memory. This limitation goes
+away with Entra, where Microsoft holds the accounts.
+
+### Running it locally
+
+The edge functions need a runtime. Either use `netlify dev`, or the small
+server included here. One install first, for the Blobs client:
+
+```bash
+npm install
+```
+
+```bash
+node dev-server.mjs
+```
+
+It serves `site/` and runs the same edge functions on the same paths, at
+<http://localhost:8888>. A throwaway session secret is generated per run, and
+accounts are held in memory. Mail the site tries to send is captured at
+`/__dev/outbox` — the pages say so under their "check your email" message, and
+only there; on the deployed site that line never appears. To test real delivery
+from the laptop, put the Resend values in `.env` and set `VTS_MAIL_OUTBOX=false`.
+`dev-server.mjs` is not published — only `site/` is.
+
+With that running, `auth-tests.mjs` exercises the whole thing — the sign-up and
+sign-in rules, sessions and logout, and the security properties above:
+
+```bash
+node auth-tests.mjs
+```
+
+155 checks; start a fresh dev server before each run, or the sign-up rate limit
+will refuse the later ones (which is the limiter working, and the suite says so
+rather than reporting a failure).
+
+### Configuration
+
+`.env.example` lists every variable with placeholder values. Real values go in
+Netlify under **Site configuration → Environment variables**; `.env` is
+git-ignored and no secret belongs in the repository. There is **no client
+secret** in this project and none should be created.
+
+### Going live without Entra
+
+The temporary sign-in was built to be deployable, not just demonstrable. To run
+it for real while the Entra registration is pending:
+
+1. **Put the project in Git and connect it to Netlify.** From the `Website`
+   folder: `git init`, commit, push to GitHub, then in Netlify choose *Import
+   from Git*. `.gitignore` already keeps `.env` and `node_modules/` out. A Git
+   deploy is what runs `npm install`, which is what makes Netlify Blobs
+   available to the edge functions. (Drag-and-drop deploys skip the install and
+   the store falls back to memory — accounts would not persist.)
+
+2. **Set the environment variables** in Netlify → *Site configuration →
+   Environment variables*:
+
+   | Variable | Value |
+   |---|---|
+   | `VTS_SESSION_SECRET` | `openssl rand -base64 48` |
+   | `RESEND_API_KEY` | from Resend, below |
+   | `MAIL_FROM` | `VTS Hub <hub@vts.edu>` — an address on the verified domain |
+   | `VTS_SITE_URL` | the site's public address, e.g. `https://hub.vts.edu` |
+   | `VTS_ALLOW_PREVIEW` | `false` — turns off the unauthenticated `?preview` view |
+
+3. **Verify `vts.edu` in Resend.** Create a Resend account, add `vts.edu` as a
+   sending domain, and give IT the DNS records it shows (an SPF `TXT`, a DKIM
+   `TXT`, and optionally a `MX` for bounces). Once Resend shows the domain as
+   verified, create an API key and put it in `RESEND_API_KEY`. Until this is
+   done, links go to the function log rather than to inboxes, and nobody can
+   confirm an account — so do it before announcing the site.
+
+4. **Custom domain.** In Netlify, add `hub.vts.edu`; IT adds the CNAME it asks
+   for; Netlify issues the certificate.
+
+5. **Check the first deploy's edge-function log** for two things: no
+   `[vts-auth] ... memory` warning (Blobs is working), and no `[vts-mail]`
+   lines after a test sign-up (mail is going through Resend, not the log).
+
+What you have at that point: durable `@vts.edu`-only accounts, each confirmed by
+email, with self-service password reset, on the site's real address. What you do
+not have, and only Entra brings: MFA, conditional access, central deprovisioning
+when someone leaves, and Microsoft's own lockout protection. When the
+registration lands, steps 1–2 of this README plus `AUTH_MODE=entra` retire all
+of this in one deploy.
+
+### Security notes
+
+Handled: passwords hashed and never logged, returned or stored in plain text;
+address ownership proven by a single-use confirmation link before an account can
+sign in; password reset via single-use, hashed, 30-minute tokens; no account
+enumeration on any of the request forms;
+`HttpOnly` `Secure` `SameSite=Lax` cookies; CSRF on every state-changing request
+(origin check plus double-submit token); session fixation (a new session id per
+sign-in); open redirect (`?next=` accepts only a path on this site); user
+enumeration (one message for a wrong password and a missing account, and the
+same time spent on both); brute force (per-address lockout after 8 failed
+sign-ins in 15 minutes); XSS (no user input reaches `innerHTML`, and a CSP with
+no inline-script escape hatch); and injection (there is no query language —
+lookups are exact-match reads of a hashed key).
+
+Two things worth stating plainly rather than leaving to be discovered:
+
+- **Rate limiting is per edge isolate.** Isolates are short-lived and there are
+  many, so it raises the cost of guessing rather than making it impossible. A
+  shared counter would need Blobs or a dedicated service; Entra brings
+  Microsoft's own smart lockout, which is the real answer.
+- **`/assets/data.js` is still public**, as it was before. The tile titles and
+  link URLs can be read without signing in. The documents themselves cannot —
+  `protect-files.js` guards every one of them. Closing this would mean putting
+  the content behind the session too, which would also end `/?preview`.
+
+`/?preview` still works exactly as it did: it renders the tile directory
+without signing in, grants no access to any document, and stops working the
+moment `AUTH_MODE=entra`. Set `VTS_ALLOW_PREVIEW=false` to turn it off sooner.
+
+---
+
+## How the protection works
+
+There are three layers, and all of them matter:
+
+**The screen.** Under Entra, `assets/app.js` uses MSAL to sign the user in
+against the VTS tenant only, then re-checks that the address ends `@vts.edu`
+(this catches guest accounts invited into the tenant). Under the temporary
+development sign-in, the same job is done by `/login`. Until one of them
+passes, the hub is not rendered.
+
+**The page.** A check in the browser is a suggestion, not a control, so
+`protect-app.js` refuses to serve `/` at all without a valid session and sends
+the visitor to `/login`. It also sets `no-store`, which is what stops Back
+redisplaying the hub after Sign out.
+
+**The documents.** A screen-only gate would be theatre — the PDFs would still
+be downloadable by anyone who guessed a URL. So after sign-in the browser posts
+its Entra token to `/api/session`; the edge function verifies the token with
+Microsoft, confirms the domain, and issues a signed HttpOnly cookie valid for
+8 hours. Every request to `/files/*` is then checked by
+`protect-files.js` before the file is served.
+
+**A worthwhile alternative:** because VTS is already on Microsoft 365, the
+documents could instead live in a SharePoint document library, with this site
+holding only links. SharePoint then enforces access with the same accounts,
+handles versioning, and lets the Finance and HR offices update their own forms
+without touching the website. If VTS wants that, only `data.js` changes — the
+`/files/` machinery can be dropped entirely.
+
+---
+
+## Editing the content
+
+Everything on the page comes from **`assets/data.js`**. Each tile has a title,
+an icon key, a kind (`doc` / `link` / `external`), and an `href`. Change a link,
+add a form, reorder a section — it is all in that one file.
+
+Icons live in `assets/icons.js` as inline SVG, keyed by name. Nothing is loaded
+from a CDN, so the site has no external dependencies and will not break when
+someone else's service goes away.
+
+Items deliberately *not* moved across (faculty photographs, preacher links,
+worship schedule, SoundCloud) are recorded at the bottom of `data.js` and shown
+in the site footer, so the omission reads as a decision rather than an oversight.
+
+---
+
+## Files
+
+Only `site/` is published. Everything outside it stays private.
+
+```
+site/index.html                          markup for the gate and the hub
+site/login.html                          sign-in page
+site/signup.html                         account creation page
+site/forgot.html                         request a password-reset link
+site/reset.html                          choose a new password from a link
+site/verify.html                         confirm an address from a link
+site/assets/config.js                    the two IDs VTS IT fills in
+site/assets/data.js                      all content — edit this
+site/assets/icons.js                     inline SVG icon set
+site/assets/app.js                       rendering; asks the auth layer who is signed in
+site/assets/auth-client.js               the browser's only door to the auth layer
+site/assets/auth-pages.js                sign-in / sign-up form behaviour
+site/assets/styles.css                   styling (brand colour #293891)
+site/assets/auth.css                     styling for the two auth pages, additive
+site/assets/logo-full.jpg                stacked logo, used on the sign-in card
+site/assets/logo-mark.jpg                the three windows, used in the masthead
+site/assets/favicon.png                  the dove window, browser tab icon
+site/vendor/msal-browser.min.js          Microsoft's auth library, vendored
+site/files/                              the documents, protected by edge function
+
+netlify/edge-functions/auth-api.js       /api/auth/* — the front end's only route
+netlify/edge-functions/protect-app.js    guards the hub page
+netlify/edge-functions/protect-files.js  guards /files/*
+netlify/edge-functions/session.js        Entra token → signed cookie
+netlify/edge-functions/lib/              the auth layer:
+  auth-service.js                          the seam — picks the provider
+  providers/development-auth.js            TEMPORARY, in use now
+  providers/entra-auth.js                  production, not yet switched on
+  validation.js                            the @vts.edu rule and password policy
+  password.js                              PBKDF2 hashing
+  session-token.js                         signed cookie, same format as session.js
+  user-store.js                            development accounts + reset tokens (Blobs / memory)
+  mailer.js                                how mail leaves the site (outbox / Resend / log)
+  rate-limit.js                            brute-force limiting
+  roles.js                                 role vocabulary and the default
+  runtime.js                               env, cookies, base64url, timing-safe compare
+
+netlify.toml                             headers, CSP, redirects; publishes site/ only
+package.json                             the one dependency (@netlify/blobs); npm scripts
+.env.example                             every variable, placeholder values only
+dev-server.mjs                           local dev server, NOT published
+auth-tests.mjs                           auth test suite, NOT published
+_source/                                 original documents and briefs, NOT published
+```
+
+**Do not move the briefs or original documents back into `site/`** — anything
+in there is served to the internet once the site is deployed.

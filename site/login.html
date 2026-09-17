@@ -25,6 +25,12 @@
 
   <p class="auth-alert" id="form-alert" role="alert" hidden></p>
 
+  <!-- Offered only after a correct password on an unconfirmed account. -->
+  <p class="auth-resend" id="resend" hidden>
+    <button class="btn-link" id="resend-btn" type="button">Send the confirmation link again</button>
+    <span class="field-hint" id="resend-hint" hidden></span>
+  </p>
+
   <form id="login-form" novalidate>
     <div class="field" id="field-email">
       <label for="email">VTS email address</label>
@@ -35,7 +41,10 @@
     </div>
 
     <div class="field" id="field-password">
-      <label for="password">Password</label>
+      <div class="field-head">
+        <label for="password">Password</label>
+        <a class="field-aside" href="/forgot" id="forgot-link">Forgot password?</a>
+      </div>
       <input id="password" name="password" type="password"
              autocomplete="current-password" required>
       <p class="field-error" id="error-password" hidden></p>

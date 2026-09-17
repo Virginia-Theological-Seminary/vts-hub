@@ -45,9 +45,12 @@ export const microsoftEntraAuth = {
   label: "Microsoft Entra ID",
   temporary: false,
 
-  /* Passwords are Microsoft's business, never this site's. */
+  /* Passwords are Microsoft's business, never this site's — and so is
+     forgetting one. Under Entra the "forgot password" link goes away and
+     the user uses Microsoft's own self-service reset. */
   supportsPasswordSignUp: false,
   supportsPasswordSignIn: false,
+  supportsPasswordReset: false,
 
   async signUp() {
     /* Accounts come from the VTS tenant; the site does not create them.
@@ -57,6 +60,23 @@ export const microsoftEntraAuth = {
 
   async signIn() {
     return NOT_ENABLED;
+  },
+
+  async requestPasswordReset() {
+    return { ...NOT_ENABLED, code: "RESET_NOT_SUPPORTED" };
+  },
+
+  async resetPassword() {
+    return { ...NOT_ENABLED, code: "RESET_NOT_SUPPORTED" };
+  },
+
+  /* Microsoft 365 addresses are verified by existing. */
+  async resendVerification() {
+    return { ...NOT_ENABLED, code: "VERIFY_NOT_SUPPORTED" };
+  },
+
+  async verifyEmail() {
+    return { ...NOT_ENABLED, code: "VERIFY_NOT_SUPPORTED" };
   },
 
   /* The domain rule survives the switch unchanged — it is the second
@@ -72,6 +92,8 @@ export const microsoftEntraAuth = {
       temporary: false,
       passwordSignIn: false,
       passwordSignUp: false,
+      passwordReset: { available: false, delivery: null },
+      emailVerification: { required: false, delivery: null },
       notice: "Sign in with your VTS Microsoft 365 account.",
     };
   },
