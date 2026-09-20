@@ -8,8 +8,11 @@ in the **vts.edu** tenant. It replaces the faculty resource board currently on
 **temporary development sign-in** — email and password accounts held by the site
 itself, restricted to `@vts.edu` addresses, each confirmed by a link sent to that
 address. It is labelled as temporary wherever it appears in the code, and it is
-designed to be swapped for Entra by changing one environment variable. It can
-also be run for real in the meantime: see [Going live without Entra](#going-live-without-entra).
+designed to be swapped for Entra by changing one environment variable. It runs
+for real on Ironistic's Plesk server — `hub.vts.edu`, with `dev-vtshub.vts.edu`
+for testing — see [Going live without Entra](#going-live-without-entra) and
+[Deploying a release](#deploying-a-release). Netlify is kept only as a fallback
+host.
 
 ---
 
@@ -21,7 +24,7 @@ also be run for real in the meantime: see [Going live without Entra](#going-live
 | 2 | Check the FY2022–23 HR and Finance documents are still current | HR / Finance |
 | 3 | Register the app in Entra ID and paste two IDs into `site/assets/config.js` | VTS IT |
 | 4 | Set `VTS_SESSION_SECRET` in Netlify | VTS IT / Ian |
-| 5 | Deploy | Ian |
+| 5 | Deploy — see [Deploying a release](#deploying-a-release) | Ironistic (JT) |
 | 6 | Until 3 is done: publish the Resend DNS records for `hub.vts.edu`, set `MAIL_FROM` to an address on it, and set `VTS_AUTH_STORE=mariadb` + `VTS_DB_*` on both Plesk sites (see [Going live](#going-live-without-entra)) | Ironistic (JT) |
 | 7 | Once 3 and 4 are done, set `AUTH_MODE=entra` to retire the temporary sign-in | Ian |
 
@@ -70,27 +73,31 @@ clientId: "…Application (client) ID…",
 
 ## 2. Set the session secret
 
-In Netlify → **Site configuration → Environment variables**, add:
+In Plesk → **Node.js** (the app) → **Custom environment variables**, add:
 
 ```
 VTS_SESSION_SECRET = <a long random string>
 ```
 
-Generate one with: `openssl rand -base64 48`
+Generate one with: `openssl rand -base64 48`. Use a different value on
+`dev-vtshub` and `hub`.
 
-This signs the short-lived cookie that authorises document downloads. Without
-it, sign-in still works but documents return "Sign-in required".
+This signs the session cookie. Without it the server refuses to start in
+production — a throwaway secret would sign everyone out on every restart.
+Rotating it deliberately does the same, which is the emergency "sign everyone
+out" lever.
 
 ## 3. Deploy
 
-Connect the repository to Netlify (*Import from Git*); it publishes `site/`, and
-`netlify.toml` and the edge functions are picked up automatically. Dragging the
-`Website` folder onto Netlify also works for a quick look, but skips the
-dependency install, so the temporary sign-in's accounts would not persist — see
-[Going live without Entra](#going-live-without-entra).
+The site runs on Ironistic's Plesk server under Passenger. Full setup is in
+[Going live without Entra](#going-live-without-entra); the short version of
+every subsequent release is in [Deploying a release](#deploying-a-release).
+`plesk-migration-requirements.md` is Ironistic's own specification for the
+hosting.
 
-Keep using the **same Netlify site** for redeploys so the URL, the Entra
-redirect URI and the environment variable all stay valid.
+Netlify is kept as a fallback host only: `netlify.toml` and the
+`netlify/edge-functions/` layout still work there unchanged (accounts go to
+Netlify Blobs), but nothing is deployed to it today.
 
 ---
 
@@ -364,6 +371,51 @@ not have, and only Entra brings: MFA, conditional access, central deprovisioning
 when someone leaves, and Microsoft's own lockout protection. When the
 registration lands, steps 1–2 of this README plus `AUTH_MODE=entra` retire all
 of this in one deploy.
+
+### Deploying a release
+
+Every release, on `dev-vtshub` first and then `hub`:
+
+1. `git pull` in `httpdocs/` (the branch the site tracks).
+2. `npm ci` — installs exactly what `package-lock.json` says.
+3. **Restart App** in Plesk → Node.js.
+4. **Read the startup log.** It must contain, and nothing marked `FATAL` or
+   `WARNING`:
+
+   ```
+   mode     production
+   store    mariadb — accounts persist
+   mail     sending for real through Resend, from VTS Hub <noreply@hub.vts.edu>
+   mail     Resend domain hub.vts.edu verified — mail can reach any address
+   ```
+
+   A `FATAL` line means the server did not start, and the line says what to
+   set. A `mail WARNING` means it started but nobody except the Resend
+   account's owner will receive email.
+
+5. Run the five `curl` checks in [Going live](#going-live-without-entra) step 5.
+6. Sign in once with a real account.
+
+Accounts and one-time tokens are in the database, so a release never signs
+anyone out or loses anyone's password. Only rotating `VTS_SESSION_SECRET` does
+the former; nothing does the latter.
+
+### Troubleshooting
+
+Symptom first, because that is how it arrives.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| "My password worked yesterday and doesn't today" / everyone has to sign up again | The store is **memory**: the startup log says `store memory`, or the server was deployed before September 2026 | `VTS_AUTH_STORE=mariadb` + `VTS_DB_*`, restart. Accounts made while on memory are gone; people sign up once more. |
+| Server will not start: `FATAL Account store unavailable` | MariaDB unreachable, wrong credentials, or `VTS_DB_*` incomplete | The line quotes the driver's reason (`ECONNREFUSED`, `Access denied`…). Check Plesk → Databases. This is deliberate: it will not fall back to memory. |
+| Server will not start: `FATAL ... dev mail outbox` | `VTS_MAIL_OUTBOX` unset or `true` in production | Set it to `false`. The outbox would publish every reset link. |
+| I get the emails; a colleague does not | `mail WARNING: MAIL_FROM uses Resend's test sender` — Resend delivers `onboarding@resend.dev` only to the account owner | Verify a domain in Resend (DNS records) and set `MAIL_FROM` to an address on it |
+| Nobody gets emails, sign-up says "couldn't send the confirmation email" | `mail WARNING: ... status is 'failed'` — the domain is added in Resend but its DNS records are not published, or `WARNING: ... is not added in Resend` | Publish the three records Resend shows; wait for status **verified** |
+| Forgot-password says "sent" but nothing arrives | Same as above. The forgot page answers identically whether or not the address exists, by design, so the failure is only in the log | Look for `[vts-mail] Resend rejected the message` in the app log |
+| `/files/*.pdf` open without signing in; `/` shows the hub without sign-in | The Plesk app's document root is `httpdocs/site`, so Apache serves files itself | Document root → `httpdocs/public` (empty folder); restart |
+| `/__dev/outbox` exists on a deployed site | Outbox on (see above) | `VTS_MAIL_OUTBOX=false`; the route then returns 404 |
+| Sign-in POST fails with the "session expired while this page was open" message | CSRF check: the `Origin` header's host does not match what the server thinks its own host is (proxy without `X-Forwarded-Host`) | Pending `server.mjs`; until then the app must be reached on the host Passenger sees |
+| "Too many attempts" on the first try | Someone else behind the same address tripped the per-address limiter, or the app was restarted mid-test | Wait 15 minutes; restarting the app also clears it |
 
 ### Security notes
 
