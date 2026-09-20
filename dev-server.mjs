@@ -13,9 +13,12 @@
    functions the same Request objects Netlify would, so what is tested
    here is the deployed code path rather than a stand-in for it.
 
-   Netlify Blobs is not available off-platform, so accounts created here
-   live in memory and disappear when the process stops. That is stated
-   on startup rather than left to be discovered.
+   Accounts: VTS_AUTH_STORE decides (see lib/user-store.js). Unset on
+   a laptop means memory, stated on startup. With NODE_ENV=production
+   this file refuses to start unless the store is persistent, the
+   session secret is set, and the dev outbox is off — a misconfigured
+   server that stops is better than one that quietly loses accounts or
+   publishes reset links (Bugs 1 and 2 of September 2026).
    ------------------------------------------------------------------ */
 
 import http from "node:http";
@@ -45,15 +48,32 @@ async function loadEnv() {
   }
 
   if (!process.env.VTS_SESSION_SECRET) {
-    /* A throwaway secret so sign-in works out of the box. Regenerated
-       every start, which means restarting the server invalidates every
-       session — correct for a dev server, and never a value that could
-       reach production. */
+    if (isProduction()) {
+      fatal("VTS_SESSION_SECRET is not set. Refusing to generate a throwaway secret in " +
+            "production: every restart would sign everyone out. Set it in the environment.");
+    }
+    /* A throwaway secret so sign-in works out of the box on a laptop.
+       Regenerated every start, which means restarting invalidates every
+       session — correct for a dev server. */
     process.env.VTS_SESSION_SECRET = crypto.randomBytes(48).toString("base64");
     console.log("  env      VTS_SESSION_SECRET generated for this run");
   }
   process.env.AUTH_MODE = process.env.AUTH_MODE || "development";
-  process.env.VTS_AUTH_STORE = process.env.VTS_AUTH_STORE || "memory";
+  /* VTS_AUTH_STORE is deliberately NOT defaulted here. The store module
+     decides, and in production it refuses to guess. */
+}
+
+function isProduction() {
+  return String(process.env.NODE_ENV || "").toLowerCase() === "production";
+}
+
+/* A configuration that cannot be served correctly stops the process
+   with one clear line. Passenger shows this in the app's log. */
+function fatal(message) {
+  console.error("");
+  console.error("  FATAL  " + message);
+  console.error("");
+  process.exit(1);
 }
 
 /* protect-files.js and session.js read Netlify.env directly, as they
@@ -188,7 +208,8 @@ const [authApi, protectApp, protectFiles, sessionApi] = [
 async function route(request, url, ip) {
   const context = { ip, next: () => serveStatic(url.pathname) };
 
-  if (url.pathname === "/__dev/outbox") {
+  /* The outbox route exists only while the outbox does. */
+  if (url.pathname === "/__dev/outbox" && outboxOn) {
     return outboxPage(url);
   }
   if (url.pathname.startsWith("/api/auth")) {
@@ -250,7 +271,24 @@ async function send(response, res) {
 await loadEnv();
 
 const outboxOn = String(process.env.VTS_MAIL_OUTBOX || "true").toLowerCase() !== "false";
+if (outboxOn && isProduction()) {
+  fatal("The dev mail outbox cannot run in production: it would publish every password-reset " +
+        "and confirmation link at /__dev/outbox. Set VTS_MAIL_OUTBOX=false.");
+}
 if (outboxOn) globalThis.__vtsDevOutbox = [];
+
+/* Prove the account store before taking a single request. */
+const { ensureStore } = await load("netlify/edge-functions/lib/user-store.js");
+let storeKind;
+try {
+  storeKind = await ensureStore();
+} catch (err) {
+  fatal("Account store unavailable — " + (err && err.message ? err.message : String(err)));
+}
+
+/* Say, at startup, whether mail can actually leave this server. */
+const { mailPreflight } = await load("netlify/edge-functions/lib/mailer.js");
+const mailNotes = await mailPreflight();
 
 const port = Number(process.env.PORT || 8888);
 
@@ -276,8 +314,9 @@ server.listen(port, () => {
   console.log("  VTS Hub — local development server");
   console.log("  http://localhost:" + port);
   console.log("");
+  console.log("  mode     " + (isProduction() ? "production" : "development"));
   console.log("  auth     AUTH_MODE=" + process.env.AUTH_MODE + " (temporary development authentication)");
-  console.log("  store    in memory — accounts are lost when this process stops");
+  console.log("  store    " + storeKind + (storeKind === "memory" ? " — accounts are lost when this process stops" : " — accounts persist"));
   if (outboxOn) {
     console.log("  mail     captured — read it at http://localhost:" + port + "/__dev/outbox");
   } else if (process.env.RESEND_API_KEY && process.env.MAIL_FROM) {
@@ -285,5 +324,6 @@ server.listen(port, () => {
   } else {
     console.log("  mail     outbox off but Resend not configured — links will print here");
   }
+  for (const note of mailNotes) console.log("  mail     " + note);
   console.log("");
 });
