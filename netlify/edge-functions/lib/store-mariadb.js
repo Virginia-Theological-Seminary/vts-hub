@@ -78,7 +78,7 @@ export async function mariadbBackend() {
       "  created_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3)," +
       "  updated_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)," +
       "  INDEX idx_kind (kind)" +
-      ") CHARACTER SET utf8mb4"
+      ") ENGINE=InnoDB CHARACTER SET utf8mb4"
   );
   await pool.query("SELECT 1");
 

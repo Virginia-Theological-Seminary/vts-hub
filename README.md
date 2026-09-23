@@ -261,6 +261,36 @@ FROM vts_hub_store WHERE kind = 'user';
 
 Nothing in it can be used to sign in. It is dropped when Entra takes over.
 
+### Database migrations
+
+`database-migrate/` holds the account store's structure as code, so the
+table on a new Plesk site is created deliberately rather than by the
+application's first start. Each migration is one file,
+`database-migrate/migrations/migration-<uuid>.mjs`, exporting `up(db)` and
+`down(db)`; applied migrations are recorded in `vts_hub_migrations` so none
+runs twice. Connection settings are the same `VTS_DB_*` variables the
+application uses, from the environment or `.env`.
+
+```bash
+npm run db -- --status                     # applied and pending
+npm run db -- --migration <uuid>           # apply one
+npm run db -- --migration <uuid> --down    # undo one (drops the table — accounts go with it)
+npm run db -- --all                        # apply every pending one, oldest first
+npm run db -- --new "what it changes"      # write a new migration-<uuid>.mjs to fill in
+npm run db --migration=<uuid>              # the npm-side spelling also works
+```
+
+The first migration, `1a88af9c-8dd0-4614-b385-493775e962bd`, builds
+`vts_hub_store` from a description of its columns and indexes. It checks
+`information_schema` first, so on a database where `store-mariadb.js`
+already created the table it adds anything missing and touches no row.
+On a fresh Plesk site, run it after `npm ci` and before the first Restart
+App:
+
+```bash
+npm run db -- --migration 1a88af9c-8dd0-4614-b385-493775e962bd
+```
+
 ### Running it locally
 
 The edge functions need a runtime. Either use `netlify dev`, or the small
@@ -540,6 +570,8 @@ netlify/edge-functions/lib/              the auth layer:
   runtime.js                               env, cookies, base64url, timing-safe compare
 
 netlify.toml                             headers, CSP, redirects; publishes site/ only
+database-migrate/migrate.mjs             migration runner and generator (npm run db), NOT published
+database-migrate/migrations/             one migration-<uuid>.mjs per structure change
 package.json                             the one dependency (@netlify/blobs); npm scripts
 .env.example                             every variable, placeholder values only
 dev-server.mjs                           local dev server, NOT published
