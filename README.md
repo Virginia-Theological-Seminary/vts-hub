@@ -8,8 +8,11 @@ in the **vts.edu** tenant. It replaces the faculty resource board currently on
 **temporary development sign-in** — email and password accounts held by the site
 itself, restricted to `@vts.edu` addresses, each confirmed by a link sent to that
 address. It is labelled as temporary wherever it appears in the code, and it is
-designed to be swapped for Entra by changing one environment variable. It can
-also be run for real in the meantime: see [Going live without Entra](#going-live-without-entra).
+designed to be swapped for Entra by changing one environment variable. It runs
+for real on Ironistic's Plesk server — `hub.vts.edu`, with `dev-vtshub.vts.edu`
+for testing — see [Going live without Entra](#going-live-without-entra) and
+[Deploying a release](#deploying-a-release). Netlify is kept only as a fallback
+host.
 
 ---
 
@@ -21,8 +24,8 @@ also be run for real in the meantime: see [Going live without Entra](#going-live
 | 2 | Check the FY2022–23 HR and Finance documents are still current | HR / Finance |
 | 3 | Register the app in Entra ID and paste two IDs into `site/assets/config.js` | VTS IT |
 | 4 | Set `VTS_SESSION_SECRET` in Netlify | VTS IT / Ian |
-| 5 | Deploy | Ian |
-| 6 | Until 3 is done: verify `vts.edu` in Resend and set the two mail variables (see [Going live](#going-live-without-entra)) | VTS IT / Ian |
+| 5 | Deploy — see [Deploying a release](#deploying-a-release) | Ironistic (JT) |
+| 6 | Until 3 is done: publish the Resend DNS records for `hub.vts.edu`, set `MAIL_FROM` to an address on it, and set `VTS_AUTH_STORE=mariadb` + `VTS_DB_*` on both Plesk sites (see [Going live](#going-live-without-entra)) | Ironistic (JT) |
 | 7 | Once 3 and 4 are done, set `AUTH_MODE=entra` to retire the temporary sign-in | Ian |
 
 **15 of the 27 tiles are live.** The other 12 render as dashed, greyed-out
@@ -70,27 +73,31 @@ clientId: "…Application (client) ID…",
 
 ## 2. Set the session secret
 
-In Netlify → **Site configuration → Environment variables**, add:
+In Plesk → **Node.js** (the app) → **Custom environment variables**, add:
 
 ```
 VTS_SESSION_SECRET = <a long random string>
 ```
 
-Generate one with: `openssl rand -base64 48`
+Generate one with: `openssl rand -base64 48`. Use a different value on
+`dev-vtshub` and `hub`.
 
-This signs the short-lived cookie that authorises document downloads. Without
-it, sign-in still works but documents return "Sign-in required".
+This signs the session cookie. Without it the server refuses to start in
+production — a throwaway secret would sign everyone out on every restart.
+Rotating it deliberately does the same, which is the emergency "sign everyone
+out" lever.
 
 ## 3. Deploy
 
-Connect the repository to Netlify (*Import from Git*); it publishes `site/`, and
-`netlify.toml` and the edge functions are picked up automatically. Dragging the
-`Website` folder onto Netlify also works for a quick look, but skips the
-dependency install, so the temporary sign-in's accounts would not persist — see
-[Going live without Entra](#going-live-without-entra).
+The site runs on Ironistic's Plesk server under Passenger. Full setup is in
+[Going live without Entra](#going-live-without-entra); the short version of
+every subsequent release is in [Deploying a release](#deploying-a-release).
+`plesk-migration-requirements.md` is Ironistic's own specification for the
+hosting.
 
-Keep using the **same Netlify site** for redeploys so the URL, the Entra
-redirect URI and the environment variable all stay valid.
+Netlify is kept as a fallback host only: `netlify.toml` and the
+`netlify/edge-functions/` layout still work there unchanged (accounts go to
+Netlify Blobs), but nothing is deployed to it today.
 
 ---
 
@@ -224,13 +231,35 @@ nothing outside the auth layer refers to any of them.
 
 ### Where the development accounts live
 
-Netlify Blobs, when it is available — no database to provision. The package is
-listed in `package.json` and imported statically, so a Git-connected deploy
-installs and bundles it. When Blobs is not available (the local dev server, or a
-site deployed without a build), the store falls back to memory and **logs a
-warning**, which means accounts do not survive a restart. Check the edge-function
-log after the first deploy: it should not mention memory. This limitation goes
-away with Entra, where Microsoft holds the accounts.
+`VTS_AUTH_STORE` decides, and the choice is never silent:
+
+| Value | Where | When |
+|---|---|---|
+| `mariadb` | a MariaDB table, `vts_hub_store` | **the Plesk deployment** — set `VTS_DB_HOST/PORT/NAME/USER/PASSWORD` |
+| `blobs` / unset on Netlify | Netlify Blobs | the Netlify fallback host |
+| `memory` / unset elsewhere | the process's memory | **local development only** — accounts vanish on restart |
+
+Three rules, learned from the September 2026 incident where every account
+disappeared on each Passenger restart because the deployed code had quietly
+fallen back to memory:
+
+- a backend that is asked for but cannot be reached is an **error**, not a
+  fallback — the server refuses to start and says why;
+- an unknown value is an error;
+- with `NODE_ENV=production`, memory is refused even when asked for by name.
+
+The table holds one JSON record per key: the account (password **hash** only,
+names, role, `emailVerifiedAt`, `passwordChangedAt`, timestamps) or a one-time
+token (by its hash). It is created on first start and can be inspected from the
+Plesk database panel:
+
+```sql
+SELECT JSON_VALUE(v,'$.email') AS email, JSON_VALUE(v,'$.role') AS role,
+       JSON_VALUE(v,'$.emailVerifiedAt') IS NOT NULL AS verified, updated_at
+FROM vts_hub_store WHERE kind = 'user';
+```
+
+Nothing in it can be used to sign in. It is dropped when Entra takes over.
 
 ### Running it locally
 
@@ -273,40 +302,68 @@ secret** in this project and none should be created.
 
 ### Going live without Entra
 
-The temporary sign-in was built to be deployable, not just demonstrable. To run
-it for real while the Entra registration is pending:
+The site runs on Ironistic's Plesk server (`hub.vts.edu`, with
+`dev-vtshub.vts.edu` for testing); Netlify is kept only as a fallback host.
+`plesk-migration-requirements.md` is Ironistic's own specification for the
+hosting; this section is the application's side of it.
 
-1. **Put the project in Git and connect it to Netlify.** From the `Website`
-   folder: `git init`, commit, push to GitHub, then in Netlify choose *Import
-   from Git*. `.gitignore` already keeps `.env` and `node_modules/` out. A Git
-   deploy is what runs `npm install`, which is what makes Netlify Blobs
-   available to the edge functions. (Drag-and-drop deploys skip the install and
-   the store falls back to memory — accounts would not persist.)
+1. **Plesk → Node.js app.** Application root `httpdocs`; **document root
+   `httpdocs/public`, an empty folder** — not `site/`. With `site/` as the
+   document root, Apache serves `/files/*.pdf` and the hub page straight from
+   disk and the sign-in check never runs. Startup file `dev-server.mjs`
+   (`server.mjs` when it lands); mode `production`; Node 22. After `git pull`:
+   `npm ci`, then Restart App.
 
-2. **Set the environment variables** in Netlify → *Site configuration →
-   Environment variables*:
+2. **Environment variables** (Plesk → Node.js → *Custom environment
+   variables*; the same set on dev and production, different values):
 
    | Variable | Value |
    |---|---|
-   | `VTS_SESSION_SECRET` | `openssl rand -base64 48` |
-   | `RESEND_API_KEY` | from Resend, below |
-   | `MAIL_FROM` | `VTS Hub <hub@vts.edu>` — an address on the verified domain |
+   | `NODE_ENV` | `production` — makes the server refuse to start misconfigured |
+   | `VTS_SESSION_SECRET` | `openssl rand -base64 48`, a different value per site |
+   | `AUTH_MODE` | `development` |
+   | `VTS_AUTH_STORE` | `mariadb` |
+   | `VTS_DB_HOST` / `VTS_DB_PORT` | `localhost` / `3306` |
+   | `VTS_DB_NAME` / `VTS_DB_USER` / `VTS_DB_PASSWORD` | from Plesk → Databases |
    | `VTS_SITE_URL` | the site's public address, e.g. `https://hub.vts.edu` |
-   | `VTS_ALLOW_PREVIEW` | `false` — turns off the unauthenticated `?preview` view |
+   | `VTS_ALLOW_PREVIEW` | `false` |
+   | `VTS_MAIL_OUTBOX` | `false` — **required**; the server will not start otherwise |
+   | `RESEND_API_KEY` | from the Resend account |
+   | `MAIL_FROM` | an address on the domain verified in Resend, e.g. `VTS Hub <noreply@hub.vts.edu>` |
 
-3. **Verify `vts.edu` in Resend.** Create a Resend account, add `vts.edu` as a
-   sending domain, and give IT the DNS records it shows (an SPF `TXT`, a DKIM
-   `TXT`, and optionally a `MX` for bounces). Once Resend shows the domain as
-   verified, create an API key and put it in `RESEND_API_KEY`. Until this is
-   done, links go to the function log rather than to inboxes, and nobody can
-   confirm an account — so do it before announcing the site.
+   Do not set `PORT`; Passenger provides it.
 
-4. **Custom domain.** In Netlify, add `hub.vts.edu`; IT adds the CNAME it asks
-   for; Netlify issues the certificate.
+3. **Verify a sending domain in Resend.** In Resend → *Domains*, add the domain
+   (`hub.vts.edu` is already added) and publish the DNS records it shows — a DKIM
+   `TXT` on `resend._domainkey.<domain>` and two `CNAME`s on `send.<domain>` and
+   `rsend.<domain>`. Ironistic manages the zone. Until Resend shows the domain
+   **verified**, nobody but the Resend account's owner receives any mail: the test
+   sender `onboarding@resend.dev` is refused for every other recipient, and an
+   unverified domain is refused for everyone. That was the September 2026 "my
+   colleague never got the email" incident. The server names either condition
+   in its startup log as a `mail WARNING`.
 
-5. **Check the first deploy's edge-function log** for two things: no
-   `[vts-auth] ... memory` warning (Blobs is working), and no `[vts-mail]`
-   lines after a test sign-up (mail is going through Resend, not the log).
+4. **Read the startup log after every deploy.** Four lines matter:
+
+   ```
+   mode     production
+   store    mariadb — accounts persist
+   mail     sending for real through Resend, from VTS Hub <noreply@hub.vts.edu>
+   mail     Resend domain hub.vts.edu verified — mail can reach any address
+   ```
+
+   `store memory`, or any `FATAL` or `mail WARNING` line, means the site is
+   not ready for real users.
+
+5. **Verify from outside:**
+
+   ```bash
+   H=https://hub.vts.edu
+   curl -sI $H/                                        # 302 -> /login
+   curl -sI $H/files/hr/staff-handbook-fy2022-23.pdf   # 401
+   curl -sI $H/__dev/outbox                            # 404
+   curl -s  $H/api/auth/context | grep -o '"delivery":"[a-z]*"' | head -1   # "email"
+   ```
 
 What you have at that point: durable `@vts.edu`-only accounts, each confirmed by
 email, with self-service password reset, on the site's real address. What you do
@@ -314,6 +371,51 @@ not have, and only Entra brings: MFA, conditional access, central deprovisioning
 when someone leaves, and Microsoft's own lockout protection. When the
 registration lands, steps 1–2 of this README plus `AUTH_MODE=entra` retire all
 of this in one deploy.
+
+### Deploying a release
+
+Every release, on `dev-vtshub` first and then `hub`:
+
+1. `git pull` in `httpdocs/` (the branch the site tracks).
+2. `npm ci` — installs exactly what `package-lock.json` says.
+3. **Restart App** in Plesk → Node.js.
+4. **Read the startup log.** It must contain, and nothing marked `FATAL` or
+   `WARNING`:
+
+   ```
+   mode     production
+   store    mariadb — accounts persist
+   mail     sending for real through Resend, from VTS Hub <noreply@hub.vts.edu>
+   mail     Resend domain hub.vts.edu verified — mail can reach any address
+   ```
+
+   A `FATAL` line means the server did not start, and the line says what to
+   set. A `mail WARNING` means it started but nobody except the Resend
+   account's owner will receive email.
+
+5. Run the five `curl` checks in [Going live](#going-live-without-entra) step 5.
+6. Sign in once with a real account.
+
+Accounts and one-time tokens are in the database, so a release never signs
+anyone out or loses anyone's password. Only rotating `VTS_SESSION_SECRET` does
+the former; nothing does the latter.
+
+### Troubleshooting
+
+Symptom first, because that is how it arrives.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| "My password worked yesterday and doesn't today" / everyone has to sign up again | The store is **memory**: the startup log says `store memory`, or the server was deployed before September 2026 | `VTS_AUTH_STORE=mariadb` + `VTS_DB_*`, restart. Accounts made while on memory are gone; people sign up once more. |
+| Server will not start: `FATAL Account store unavailable` | MariaDB unreachable, wrong credentials, or `VTS_DB_*` incomplete | The line quotes the driver's reason (`ECONNREFUSED`, `Access denied`…). Check Plesk → Databases. This is deliberate: it will not fall back to memory. |
+| Server will not start: `FATAL ... dev mail outbox` | `VTS_MAIL_OUTBOX` unset or `true` in production | Set it to `false`. The outbox would publish every reset link. |
+| I get the emails; a colleague does not | `mail WARNING: MAIL_FROM uses Resend's test sender` — Resend delivers `onboarding@resend.dev` only to the account owner | Verify a domain in Resend (DNS records) and set `MAIL_FROM` to an address on it |
+| Nobody gets emails, sign-up says "couldn't send the confirmation email" | `mail WARNING: ... status is 'failed'` — the domain is added in Resend but its DNS records are not published, or `WARNING: ... is not added in Resend` | Publish the three records Resend shows; wait for status **verified** |
+| Forgot-password says "sent" but nothing arrives | Same as above. The forgot page answers identically whether or not the address exists, by design, so the failure is only in the log | Look for `[vts-mail] Resend rejected the message` in the app log |
+| `/files/*.pdf` open without signing in; `/` shows the hub without sign-in | The Plesk app's document root is `httpdocs/site`, so Apache serves files itself | Document root → `httpdocs/public` (empty folder); restart |
+| `/__dev/outbox` exists on a deployed site | Outbox on (see above) | `VTS_MAIL_OUTBOX=false`; the route then returns 404 |
+| Sign-in POST fails with the "session expired while this page was open" message | CSRF check: the `Origin` header's host does not match what the server thinks its own host is (proxy without `X-Forwarded-Host`) | Pending `server.mjs`; until then the app must be reached on the host Passenger sees |
+| "Too many attempts" on the first try | Someone else behind the same address tripped the per-address limiter, or the app was restarted mid-test | Wait 15 minutes; restarting the app also clears it |
 
 ### Security notes
 
@@ -430,7 +532,8 @@ netlify/edge-functions/lib/              the auth layer:
   validation.js                            the @vts.edu rule and password policy
   password.js                              PBKDF2 hashing
   session-token.js                         signed cookie, same format as session.js
-  user-store.js                            development accounts + reset tokens (Blobs / memory)
+  user-store.js                            development accounts + one-time tokens; picks the backend
+  store-mariadb.js                         the MariaDB backend (Plesk)
   mailer.js                                how mail leaves the site (outbox / Resend / log)
   rate-limit.js                            brute-force limiting
   roles.js                                 role vocabulary and the default

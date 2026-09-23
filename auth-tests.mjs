@@ -10,6 +10,10 @@
        node dev-server.mjs                     (terminal 1)
        PORT=8888 node auth-tests.mjs           (terminal 2)
 
+   The MariaDB and restart sections run only when VTS_DB_HOST,
+   VTS_DB_NAME and VTS_DB_USER (and usually VTS_DB_PASSWORD) are set in
+   the environment; otherwise they are reported as SKIP.
+
    Fresh matters: the suite creates around a dozen accounts, and the
    sign-up rate limit is 30 per hour per address. Three runs against one
    long-lived server will trip it — which is the limiter working, not a
@@ -821,6 +825,192 @@ section("Resend adapter (stubbed network)");
   globalThis.__vtsDevOutbox = savedOutbox;
   delete process.env.RESEND_API_KEY;
   delete process.env.MAIL_FROM;
+}
+
+/* ================= PERSISTENCE ================= */
+section("Persistence: store selection is explicit and fail-safe");
+
+{
+  /* Each rule runs in a fresh process so the module's cached choice
+     cannot leak between cases. */
+  const { spawn } = await import("node:child_process");
+  const ROOT = new URL("./", import.meta.url);
+  const probe = `
+    import("./netlify/edge-functions/lib/user-store.js")
+      .then((s) => s.ensureStore())
+      .then((k) => { console.log("OK " + k); process.exit(0); })
+      .catch((e) => { console.log("FAIL " + e.message.split("\\n")[0]); process.exit(0); });`;
+  async function choose(extra) {
+    const env = { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, ...extra };
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", probe], { cwd: ROOT, env });
+      let out = "";
+      child.stdout.on("data", (d) => (out += d));
+      child.on("close", () => resolve((out.split(/\r?\n/).find((l) => /^(OK|FAIL)/.test(l)) || "").trim()));
+    });
+  }
+
+  check("development + unset -> memory", (await choose({})) === "OK memory");
+  check("development + memory -> memory", (await choose({ VTS_AUTH_STORE: "memory" })) === "OK memory");
+  check("production + memory is REFUSED",
+    /^FAIL .*refused/.test(await choose({ NODE_ENV: "production", VTS_AUTH_STORE: "memory" })));
+  check("production + unset is REFUSED (no silent fallback)",
+    /^FAIL .*No account store configured/.test(await choose({ NODE_ENV: "production" })));
+  check("unknown store value is an error",
+    /^FAIL .*Unknown VTS_AUTH_STORE/.test(await choose({ VTS_AUTH_STORE: "bogus" })));
+  check("mariadb with VTS_DB_* missing is an error, not memory",
+    /^FAIL .*VTS_DB_NAME/.test(await choose({ VTS_AUTH_STORE: "mariadb" })));
+  check("mariadb unreachable is an error, not memory",
+    /^FAIL .*ECONNREFUSED/.test(await choose({
+      VTS_AUTH_STORE: "mariadb", VTS_DB_HOST: "127.0.0.1", VTS_DB_PORT: "1", VTS_DB_NAME: "x", VTS_DB_USER: "x" })));
+}
+
+section("Persistence: MariaDB backend");
+
+const DB = {
+  VTS_DB_HOST: process.env.VTS_DB_HOST, VTS_DB_PORT: process.env.VTS_DB_PORT || "3306",
+  VTS_DB_NAME: process.env.VTS_DB_NAME, VTS_DB_USER: process.env.VTS_DB_USER,
+  VTS_DB_PASSWORD: process.env.VTS_DB_PASSWORD || "",
+};
+const haveDb = Boolean(DB.VTS_DB_HOST && DB.VTS_DB_NAME && DB.VTS_DB_USER);
+
+if (!haveDb) {
+  console.log("  SKIP  set VTS_DB_HOST / VTS_DB_NAME / VTS_DB_USER (and VTS_DB_PASSWORD / VTS_DB_PORT) to run these");
+} else {
+  /* In-process, against the real database. A query-string suffix gives
+     this import its own module instance, so the memory store chosen by
+     the earlier in-process section is not reused. */
+  const LIB = new URL("./netlify/edge-functions/lib/", import.meta.url);
+  Object.assign(process.env, DB, { VTS_AUTH_STORE: "mariadb" });
+  const store = await import(new URL("user-store.js?backend=mariadb", LIB));
+  const mdb = await import(new URL("store-mariadb.js", LIB));
+  const { hashPassword } = await import(new URL("password.js", LIB));
+  const { sha256Hex } = await import(new URL("runtime.js", LIB));
+
+  check("ensureStore() reports mariadb", (await store.ensureStore()) === "mariadb");
+
+  const email = at("db.persist");
+  const hash = await hashPassword(strong);
+  const created = await store.createUser({ email, passwordHash: hash, firstName: "Data", lastName: "Base", role: "student" });
+  check("createUser writes a row", created.ok === true);
+  const dup = await store.createUser({ email, passwordHash: hash, firstName: "Dup", lastName: "Licate", role: "student" });
+  check("duplicate createUser is refused by the primary key", dup.ok === false && dup.reason === "exists");
+
+  const row = await store.findUserByEmail(email);
+  check("row round-trips: email, names, role, verified state, timestamps",
+    Boolean(row) && row.email === email && row.firstName === "Data" && row.lastName === "Base" &&
+    row.role === "student" && row.emailVerifiedAt === null && Boolean(row.createdAt) && Boolean(row.updatedAt));
+  check("row holds a PBKDF2 hash, never the password",
+    /^pbkdf2-sha256\$/.test(row.passwordHash) && JSON.stringify(row).indexOf(strong) === -1);
+
+  await store.updateUser(email, { emailVerifiedAt: Date.now(), passwordChangedAt: Date.now() });
+  const updated = await store.findUserByEmail(email);
+  check("updateUser persists verification and password-changed timestamps",
+    Boolean(updated.emailVerifiedAt) && Boolean(updated.passwordChangedAt));
+
+  const live = await sha256Hex("live-token-" + RUN);
+  await store.putToken(live, { email, purpose: "reset", expiresAt: Date.now() + 60000 });
+  check("token cannot be redeemed for another purpose", (await store.takeToken(live, "verify")) === null);
+  await store.putToken(live, { email, purpose: "reset", expiresAt: Date.now() + 60000 });
+  check("token is redeemed once", (await store.takeToken(live, "reset"))?.email === email);
+  check("...and is gone afterwards", (await store.takeToken(live, "reset")) === null);
+  const stale = await sha256Hex("stale-token-" + RUN);
+  await store.putToken(stale, { email, purpose: "reset", expiresAt: Date.now() - 1 });
+  check("expired reset token is refused", (await store.takeToken(stale, "reset")) === null);
+
+  const { createPool } = await import("mysql2/promise");
+  const pool = createPool({ host: DB.VTS_DB_HOST, port: Number(DB.VTS_DB_PORT), database: DB.VTS_DB_NAME,
+    user: DB.VTS_DB_USER, password: DB.VTS_DB_PASSWORD });
+  const [rows] = await pool.query("SELECT kind FROM " + mdb.TABLE + " WHERE JSON_VALUE(v, '$.email') = ?", [email]);
+  check("the account is a row in " + mdb.TABLE, rows.length === 1 && rows[0].kind === "user");
+  const [plain] = await pool.query("SELECT COUNT(*) AS n FROM " + mdb.TABLE + " WHERE v LIKE ?", ["%" + strong + "%"]);
+  check("no row anywhere contains the plaintext password", Number(plain[0].n) === 0);
+  await pool.end();
+}
+
+section("Persistence: sign in survives a Node restart");
+
+if (!haveDb) {
+  console.log("  SKIP  needs the MariaDB variables above");
+} else {
+  /* Two server processes in turn on a private port, sharing only the
+     database and the session secret — what the user reported as Bug 1. */
+  const { spawn } = await import("node:child_process");
+  const ROOT = new URL("./", import.meta.url);
+  const PORT = 8909, B = "http://localhost:" + PORT;
+  const SECRET = "test-secret-" + RUN;
+  const boot = () => {
+    const child = spawn(process.execPath, ["dev-server.mjs"], {
+      cwd: ROOT, stdio: ["ignore", "pipe", "pipe"],
+      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, PORT: String(PORT),
+        VTS_SESSION_SECRET: SECRET, VTS_MAIL_OUTBOX: "true", VTS_AUTH_STORE: "mariadb", ...DB },
+    });
+    let log = ""; child.stdout.on("data", (d) => (log += d)); child.stderr.on("data", (d) => (log += d));
+    return { child, log: () => log };
+  };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const until = async (fn, tries = 40) => { for (let i = 0; i < tries; i++) { if (fn()) return true; await sleep(250); } return false; };
+  const rest = async (path, body, jar) => {
+    const headers = { "content-type": "application/json", origin: B };
+    if (jar.csrf) { headers["x-vts-csrf"] = jar.csrf; headers.cookie = "vts_csrf=" + jar.csrf; }
+    const r = await fetch(B + path, { method: body ? "POST" : "GET", headers, body: body && JSON.stringify(body) });
+    for (const c of r.headers.getSetCookie?.() || []) { const m = /^vts_csrf=([^;]+)/.exec(c); if (m) jar.csrf = decodeURIComponent(m[1]); }
+    return { status: r.status, body: await r.json().catch(() => null) };
+  };
+
+  const email = at("survives.restart"), password = "Survive!Me1";
+  let server = boot();
+  check("server 1 starts on MariaDB", await until(() => /store    mariadb/.test(server.log())));
+  const jar = {};
+  await rest("/api/auth/context", null, jar);
+  const up = await rest("/api/auth/signup", { firstName: "Still", lastName: "Here", email, password, confirmPassword: password }, jar);
+  check("sign up on server 1", up.status === 201, up.status);
+  const outbox = await (await fetch(B + "/__dev/outbox?json")).json();
+  const link = (/https?:\/\/\S+/.exec(outbox.at(-1)?.text || "") || [])[0] || "";
+  const verifyToken = link ? new URL(link).searchParams.get("token") : "";
+  check("confirmation link issued", Boolean(verifyToken));
+  check("confirm on server 1", (await rest("/api/auth/verify", { token: verifyToken }, jar)).status === 200);
+  check("sign in on server 1", (await rest("/api/auth/login", { email, password }, jar)).status === 200);
+
+  server.child.kill();
+  await sleep(600);
+  server = boot();
+  check("server 2 starts on MariaDB", await until(() => /store    mariadb/.test(server.log())));
+  const jar2 = {};
+  await rest("/api/auth/context", null, jar2);
+  const again = await rest("/api/auth/login", { email, password }, jar2);
+  check("SAME email + SAME password sign in after the restart", again.status === 200,
+    again.status + " " + JSON.stringify(again.body?.error || "").slice(0, 80));
+  check("wrong password is still wrong after the restart",
+    (await rest("/api/auth/login", { email, password: "Wrong!Pw9" }, jar2)).status === 401);
+  server.child.kill();
+}
+
+section("Sessions expire; accounts do not");
+
+{
+  /* An expired session is refused, and the account behind it signs in
+     again with the same password — the distinction the brief draws. */
+  const LIB = new URL("./netlify/edge-functions/lib/", import.meta.url);
+  const tok = await import(new URL("session-token.js", LIB));
+  const secret = "test-secret-" + RUN;
+  const who = { id: "u1", email: at("x"), role: "student" };
+  const expired = await tok.signSession({ ...tok.sessionPayload(who, "development"), exp: Date.now() - 1000 }, secret);
+  check("an expired session token is refused", (await tok.verifySession(expired, secret)) === null);
+  const fresh = await tok.signSession(tok.sessionPayload(who, "development"), secret);
+  check("a fresh session token is accepted", (await tok.verifySession(fresh, secret))?.email === at("x"));
+
+  const c = new Client();
+  await c.primeCsrf();
+  const email = at("expiry.user");
+  await c.fetch("/api/auth/signup", { json: { firstName: "Ex", lastName: "Piry", email, password: strong, confirmPassword: strong } });
+  await confirm(c, email);
+  await c.fetch("/api/auth/login", { json: { email, password: strong } });
+  /* The cookie expiring client-side looks, to the server, like this: */
+  c.jar.delete("vts_session");
+  check("without a session the hub is refused", (await c.fetch("/")).status === 302);
+  check("...but the same email + password sign in again",
+    (await c.fetch("/api/auth/login", { json: { email, password: strong } })).status === 200);
 }
 
 /* ================= SHIPPED ASSETS ================= */

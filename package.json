@@ -11,6 +11,7 @@
     "test": "node auth-tests.mjs"
   },
   "dependencies": {
-    "@netlify/blobs": "^11.1.0"
+    "@netlify/blobs": "^11.1.0",
+    "mysql2": "^3.24.4"
   }
 }

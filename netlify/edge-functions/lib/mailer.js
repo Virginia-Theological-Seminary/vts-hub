@@ -98,3 +98,65 @@ async function deliver(message) {
 export async function sendMail({ to, subject, text }) {
   await deliver({ to, subject, text });
 }
+
+/* ---------------- startup preflight ---------------- */
+
+function fromDomain() {
+  const match = /@([A-Za-z0-9.-]+)>?\s*$/.exec(String(env("MAIL_FROM", "")));
+  return match ? match[1].toLowerCase() : "";
+}
+
+/* Answers, at startup, the question Bug 2 turned on: "will a message
+   to someone other than the account owner actually leave this server?"
+   Returns human-readable notes for the startup log. Never fatal —
+   Resend being briefly unreachable must not stop the site — and never
+   includes the key. */
+export async function mailPreflight() {
+  const notes = [];
+  const delivery = mailDelivery();
+
+  if (delivery === "outbox") return notes;
+  if (delivery === "log") {
+    notes.push("WARNING: no mail provider configured — links go to this log only");
+    return notes;
+  }
+
+  const domain = fromDomain();
+  if (domain === "resend.dev") {
+    notes.push(
+      "WARNING: MAIL_FROM uses Resend's test sender — Resend delivers it ONLY to the " +
+        "address that owns the Resend account. Every other recipient is refused (403). " +
+        "Verify a domain in Resend and set MAIL_FROM to an address on it."
+    );
+    return notes;
+  }
+
+  try {
+    const response = await fetch("https://api.resend.com/domains", {
+      headers: { authorization: "Bearer " + env("RESEND_API_KEY") },
+    });
+    if (!response.ok) {
+      notes.push("WARNING: Resend rejected the API key (HTTP " + response.status + ")");
+      return notes;
+    }
+    const domains = (await response.json()).data || [];
+    /* MAIL_FROM may be on the verified domain or a subdomain of it. */
+    const match = domains.find((d) => domain === d.name || domain.endsWith("." + d.name));
+    if (!match) {
+      notes.push(
+        "WARNING: " + domain + " is not added in Resend — sending from it will be refused. " +
+          "Add it under Domains and publish the DNS records."
+      );
+    } else if (match.status !== "verified") {
+      notes.push(
+        "WARNING: " + match.name + " is in Resend but its status is '" + match.status +
+          "' — the DNS records are not (yet) published, so sending will be refused."
+      );
+    } else {
+      notes.push("Resend domain " + match.name + " verified — mail can reach any address");
+    }
+  } catch (err) {
+    notes.push("note: could not reach Resend to check the sending domain (" + err.message + ")");
+  }
+  return notes;
+}
