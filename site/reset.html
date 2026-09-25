@@ -19,22 +19,55 @@
 
   <h1>Choose a new password</h1>
   <p class="gate-sub">
-    Pick something you haven't used here before.
+    Enter your VTS email address and the recovery code you saved when
+    you created your account.
   </p>
 
   <p class="auth-alert" id="form-alert" role="alert" hidden></p>
 
-  <!-- Shown instead of the form when the link is missing, used, or
-       expired. -->
-  <div id="no-token" hidden>
-    <p class="auth-alert" role="alert">
-      This password reset link is invalid or has expired. Please request a
-      new one.
+  <!-- Shown once the password is changed: a fresh code replaces the
+       one just used, so the holder is never left without a way back. -->
+  <div id="recovery" hidden>
+    <p class="auth-alert is-success" role="status">
+      Your password has been updated.
     </p>
-    <a class="btn-primary" href="/forgot">Request a new link</a>
+
+    <h2 class="recovery-heading">Save your new recovery code</h2>
+    <p class="recovery-why">
+      The code you just used has been spent. This one replaces it.
+    </p>
+
+    <p class="recovery-code" id="recovery-code" tabindex="0"
+       aria-label="Your new recovery code"></p>
+
+    <button class="btn-quiet recovery-copy" id="recovery-copy" type="button">
+      Copy code
+    </button>
+
+    <a class="btn-primary" id="recovery-continue" href="/login?reset=1">
+      I've saved it &mdash; continue to sign in
+    </a>
   </div>
 
   <form id="reset-form" novalidate>
+    <div class="field" id="field-email">
+      <label for="email">VTS email address</label>
+      <input id="email" name="email" type="email" inputmode="email"
+             autocomplete="username" spellcheck="false"
+             placeholder="you@vts.edu" required>
+      <p class="field-error" id="error-email" hidden></p>
+    </div>
+
+    <div class="field" id="field-recoveryCode">
+      <label for="recoveryCode">Recovery code</label>
+      <input id="recoveryCode" name="recoveryCode" type="text"
+             autocomplete="one-time-code" spellcheck="false"
+             autocapitalize="characters" placeholder="VTSH-XXXX-XXXX-XXXX-XXXX"
+             required>
+      <p class="field-hint">The code you saved when you created your account.</p>
+      <p class="field-error" id="error-recoveryCode" hidden></p>
+    </div>
+
     <div class="field" id="field-password">
       <label for="password">New password</label>
       <input id="password" name="password" type="password"

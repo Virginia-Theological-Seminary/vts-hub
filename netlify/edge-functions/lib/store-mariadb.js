@@ -44,7 +44,10 @@ export function mariadbSettings() {
 }
 
 function kindOf(key) {
-  return String(key).startsWith("token:") ? "token" : "user";
+  const name = String(key);
+  if (name.startsWith("token:")) return "token";
+  if (name.startsWith("invite:")) return "invite";
+  return "user";
 }
 
 /* Opens a pool, ensures the table exists, proves the connection works.
@@ -128,6 +131,23 @@ export async function mariadbBackend() {
         "SELECT COUNT(*) AS n FROM " + TABLE + " WHERE kind = 'user'"
       );
       return Number(rows[0].n);
+    },
+
+    /* Used only by the administration tool. `kind` is a column, so
+       this does not have to parse every row to find the accounts. */
+    async listUsers() {
+      const [rows] = await pool.query(
+        "SELECT v FROM " + TABLE + " WHERE kind = 'user' ORDER BY created_at"
+      );
+      return rows
+        .map((row) => {
+          try {
+            return JSON.parse(row.v);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
     },
 
     async close() {

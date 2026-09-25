@@ -94,6 +94,8 @@ export const microsoftEntraAuth = {
       passwordSignUp: false,
       passwordReset: { available: false, delivery: null },
       emailVerification: { required: false, delivery: null },
+      /* The tenant decides who exists; there is nothing to invite. */
+      invitation: { required: false },
       notice: "Sign in with your VTS Microsoft 365 account.",
     };
   },

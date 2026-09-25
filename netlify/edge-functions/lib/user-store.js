@@ -63,6 +63,11 @@ const memoryBackend = {
   async count() {
     return memory.size;
   },
+  async listUsers() {
+    return [...memory.entries()]
+      .filter(([key]) => !key.startsWith("token:") && !key.startsWith("invite:"))
+      .map(([, value]) => value);
+  },
 };
 
 /* ---------------- Netlify Blobs backend ---------------- */
@@ -112,6 +117,16 @@ async function blobsBackend() {
       } catch {
         return null;
       }
+    },
+    async listUsers() {
+      const { blobs } = await store.list();
+      const users = [];
+      for (const blob of blobs) {
+        if (blob.key.startsWith("token:") || blob.key.startsWith("invite:")) continue;
+        const value = await store.get(blob.key, { type: "json" });
+        if (value) users.push(value);
+      }
+      return users;
     },
   };
 }
@@ -223,6 +238,16 @@ export async function createUser({
      provider passes a timestamp when email verification is switched
      off and the account is usable from the moment it is created. */
   emailVerifiedAt = null,
+  /* PBKDF2 hash of the recovery code issued at sign-up — the proof
+     required to reset a password while there is no working email.
+     Optional, so callers predating it are unaffected. */
+  recoveryCodeHash = null,
+  /* Whether a confirmation was asked of THIS account. Distinct from
+     emailVerifiedAt being null, which is also true of accounts made
+     before anyone asked — those must not be locked out when the policy
+     changes. Defaults to false, so records predating the field read
+     as "nothing was ever asked of it", which is what they are. */
+  verificationPending = false,
 }) {
   const store = await backend();
   const key = await keyFor(email);
@@ -238,6 +263,8 @@ export async function createUser({
        or at creation, when verification is not required. Null means the
        account exists but cannot sign in. */
     emailVerifiedAt,
+    verificationPending: Boolean(verificationPending),
+    recoveryCodeHash,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -256,6 +283,44 @@ export async function updateUser(email, patch) {
   const next = { ...current, ...patch, email: current.email, id: current.id, updatedAt: new Date().toISOString() };
   await store.set(key, next);
   return next;
+}
+
+/* ---------------- invitations ---------------- */
+
+/* Issued by an administrator for one named address; see invite.js.
+   Stored under a key derived from the address, so issuing a second
+   invitation replaces the first rather than leaving two live. Only the
+   hash of the code is kept. */
+export async function putInvite(email, { codeHash, issuedAt }) {
+  const store = await backend();
+  const { inviteKeyFor } = await import("./invite.js");
+  await store.set(await inviteKeyFor(email), { email, codeHash, issuedAt });
+}
+
+export async function findInvite(email) {
+  const store = await backend();
+  const { inviteKeyFor } = await import("./invite.js");
+  return store.get(await inviteKeyFor(email));
+}
+
+/* Redeeming removes it: an invitation opens one account, once. */
+export async function takeInvite(email) {
+  const store = await backend();
+  const { inviteKeyFor } = await import("./invite.js");
+  const key = await inviteKeyFor(email);
+  const record = await store.get(key);
+  if (record) await store.delete(key);
+  return record;
+}
+
+/* Every account, for the administration tool. Not reachable from any
+   route: nothing in auth-api.js calls it, and it is not something an
+   unauthenticated caller could ever be allowed to ask for. */
+export async function listUsers() {
+  const store = await backend();
+  if (!store.listUsers) return [];
+  const users = await store.listUsers();
+  return users.sort((a, b) => String(a.email).localeCompare(String(b.email)));
 }
 
 /* Removes an account outright. Used when a sign-up cannot be completed
@@ -311,6 +376,17 @@ export function publicUser(user) {
     emailVerified: Boolean(user.emailVerifiedAt),
     createdAt: user.createdAt,
   };
+}
+
+/* Releases the backend's resources. Long-running servers never call
+   this — they keep the pool for the life of the process — but a
+   command-line tool has to, or Node stays alive holding an idle
+   database connection and the command appears to hang. */
+export async function closeStore() {
+  if (!backendPromise) return;
+  const store = await backendPromise.catch(() => null);
+  backendPromise = null;
+  if (store && typeof store.close === "function") await store.close();
 }
 
 export async function storeKind() {

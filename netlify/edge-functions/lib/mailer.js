@@ -106,29 +106,63 @@ function fromDomain() {
   return match ? match[1].toLowerCase() : "";
 }
 
-/* Answers, at startup, the question Bug 2 turned on: "will a message
-   to someone other than the account owner actually leave this server?"
-   Returns human-readable notes for the startup log. Never fatal —
-   Resend being briefly unreachable must not stop the site — and never
-   includes the key. */
-export async function mailPreflight() {
-  const notes = [];
+/* Can a message from this server actually reach somebody who is not
+   the mail account's own owner?
+
+   This is the question the whole sign-up design turns on. Email
+   confirmation is the simplest way to prove an address belongs to the
+   person typing it — but only if mail genuinely leaves the building.
+   While it does not, requiring confirmation would lock everybody out
+   rather than protect anything.
+
+   Returns { usable, reason, detail }. `usable` is deliberately
+   pessimistic: anything unproven is treated as "no".
+
+   The answer is cached, because it is asked at startup and then by
+   every sign-up. Restarting re-asks it, which is how a newly published
+   set of DNS records takes effect. */
+let cached = null;
+
+export async function mailCapability({ refresh = false } = {}) {
+  if (cached && !refresh) return cached;
+
   const delivery = mailDelivery();
 
-  if (delivery === "outbox") return notes;
+  if (delivery === "outbox") {
+    /* Not usable, and deliberately so. The local outbox captures
+       messages; it does not deliver them. Treating it as delivery would
+       make the development server behave unlike the server it stands
+       in for, which is the one thing a development server must not do.
+       To work on the confirmation flow locally, pin the policy with
+       VTS_SIGNUP_POLICY=email and read the link in the outbox. */
+    cached = {
+      usable: false,
+      reason: "outbox",
+      detail: "captured locally at /__dev/outbox — delivered to nobody",
+    };
+    return cached;
+  }
+
   if (delivery === "log") {
-    notes.push("WARNING: no mail provider configured — links go to this log only");
-    return notes;
+    cached = {
+      usable: false,
+      reason: "no-provider",
+      detail: "no mail provider configured — links would go to this log only",
+    };
+    return cached;
   }
 
   const domain = fromDomain();
+
   if (domain === "resend.dev") {
-    notes.push(
-      "WARNING: MAIL_FROM uses Resend's test sender — Resend delivers it ONLY to the " +
-        "address that owns the Resend account. Every other recipient is refused (403). " +
-        "Verify a domain in Resend and set MAIL_FROM to an address on it."
-    );
-    return notes;
+    cached = {
+      usable: false,
+      reason: "test-sender",
+      detail:
+        "MAIL_FROM uses Resend's test sender, which Resend delivers ONLY to the address " +
+        "that owns the Resend account; every other recipient is refused",
+    };
+    return cached;
   }
 
   try {
@@ -136,27 +170,57 @@ export async function mailPreflight() {
       headers: { authorization: "Bearer " + env("RESEND_API_KEY") },
     });
     if (!response.ok) {
-      notes.push("WARNING: Resend rejected the API key (HTTP " + response.status + ")");
-      return notes;
+      cached = {
+        usable: false,
+        reason: "key-rejected",
+        detail: "Resend rejected the API key (HTTP " + response.status + ")",
+      };
+      return cached;
     }
+
     const domains = (await response.json()).data || [];
     /* MAIL_FROM may be on the verified domain or a subdomain of it. */
     const match = domains.find((d) => domain === d.name || domain.endsWith("." + d.name));
+
     if (!match) {
-      notes.push(
-        "WARNING: " + domain + " is not added in Resend — sending from it will be refused. " +
-          "Add it under Domains and publish the DNS records."
-      );
+      cached = {
+        usable: false,
+        reason: "domain-missing",
+        detail:
+          domain + " is not added in Resend — sending from it is refused. Add it under " +
+          "Domains and publish the DNS records it shows",
+      };
     } else if (match.status !== "verified") {
-      notes.push(
-        "WARNING: " + match.name + " is in Resend but its status is '" + match.status +
-          "' — the DNS records are not (yet) published, so sending will be refused."
-      );
+      cached = {
+        usable: false,
+        reason: "domain-unverified",
+        detail:
+          match.name + " is in Resend but its status is '" + match.status +
+          "' — its DNS records are not published, so sending is refused",
+      };
     } else {
-      notes.push("Resend domain " + match.name + " verified — mail can reach any address");
+      cached = {
+        usable: true,
+        reason: "verified",
+        detail: "Resend domain " + match.name + " verified — mail can reach any address",
+      };
     }
   } catch (err) {
-    notes.push("note: could not reach Resend to check the sending domain (" + err.message + ")");
+    /* Unreachable is not the same as broken, but it is not proof
+       either, so it counts as unusable until it answers. */
+    cached = {
+      usable: false,
+      reason: "unreachable",
+      detail: "could not reach Resend to check the sending domain (" + err.message + ")",
+    };
   }
-  return notes;
+
+  return cached;
+}
+
+/* Human-readable lines for the startup log. */
+export async function mailPreflight() {
+  const capability = await mailCapability();
+  if (capability.reason === "outbox") return [];
+  return [(capability.usable ? "" : "WARNING: ") + capability.detail];
 }

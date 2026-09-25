@@ -19,8 +19,8 @@
 
   <h1>Create your VTS Hub account</h1>
   <p class="gate-sub">
-    Open to Virginia Theological Seminary <strong>@vts.edu</strong>
-    addresses only.
+    For Virginia Theological Seminary
+    <strong>@vts.edu</strong> addresses.
   </p>
 
   <p class="auth-alert" id="form-alert" role="alert" hidden></p>
@@ -30,6 +30,37 @@
   <div id="sent" hidden>
     <p class="auth-alert is-success" id="sent-message" role="status"></p>
     <p class="field-hint" id="sent-hint" hidden></p>
+  </div>
+
+  <!-- Shown once, immediately after the account is created. The server
+       keeps only a hash of this, so it cannot be shown again. -->
+  <div id="recovery" hidden>
+    <p class="auth-alert is-success" role="status">
+      Your VTS Hub account has been created.
+    </p>
+
+    <h2 class="recovery-heading">Save your recovery code</h2>
+    <p class="recovery-why">
+      This is the only way to reset your password if you forget it.
+      Write it down or save it somewhere safe &mdash; it will not be
+      shown again.
+    </p>
+
+    <p class="recovery-code" id="recovery-code" tabindex="0"
+       aria-label="Your recovery code"></p>
+
+    <button class="btn-quiet recovery-copy" id="recovery-copy" type="button">
+      Copy code
+    </button>
+
+    <!-- Only when a confirmation link was also sent: the code above is
+         saved now, the account opens when the link is opened. -->
+    <p class="auth-alert is-success" id="recovery-verify" role="status" hidden></p>
+    <p class="field-hint" id="recovery-hint" hidden></p>
+
+    <a class="btn-primary" id="recovery-continue" href="/login?created=1">
+      I've saved it &mdash; continue to sign in
+    </a>
   </div>
 
   <form id="signup-form" novalidate>
@@ -55,6 +86,17 @@
              placeholder="you@vts.edu" required>
       <p class="field-hint">Must end in <strong>@vts.edu</strong>.</p>
       <p class="field-error" id="error-email" hidden></p>
+    </div>
+
+    <div class="field" id="field-inviteCode">
+      <label for="inviteCode">Invitation code</label>
+      <input id="inviteCode" name="inviteCode" type="text"
+             autocomplete="off" spellcheck="false"
+             autocapitalize="characters" placeholder="VTSI-XXXX-XXXX" required>
+      <p class="field-hint">
+        Issued to you by the VTS development team for this address.
+      </p>
+      <p class="field-error" id="error-inviteCode" hidden></p>
     </div>
 
     <div class="field" id="field-password">

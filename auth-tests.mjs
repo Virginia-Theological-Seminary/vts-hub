@@ -54,6 +54,11 @@ class Client {
     }
   }
   async fetch(path, options = {}) {
+    /* Every sign-up needs an invitation now. Issued here unless the test
+       supplies its own inviteCode — the ones that check the gate do. */
+    if (path === "/api/auth/signup" && options.json && !("inviteCode" in options.json)) {
+      options = { ...options, json: { ...options.json, inviteCode: await issueInvite(options.json.email) } };
+    }
     const headers = Object.assign({}, options.headers);
     const cookie = this.cookieHeader();
     if (cookie) headers.cookie = cookie;
@@ -80,6 +85,21 @@ class Client {
 }
 
 const strong = "Str0ng!Pass1";
+
+/* Sign-up is by invitation (INVITATION_REQUIRED in development-auth.js):
+   an administrator issues a code for one named address, because the
+   @vts.edu rule can only check the shape of an address, not ownership. */
+const LIB_URL = new URL("./netlify/edge-functions/lib/", import.meta.url);
+async function issueInvite(email) {
+  const store = await import(new URL("user-store.js?invites", LIB_URL));
+  const { generateInviteCode, hashInviteCode } = await import(new URL("invite.js", LIB_URL));
+  const code = generateInviteCode();
+  await store.putInvite(String(email ?? "").trim().toLowerCase(), {
+    codeHash: await hashInviteCode(code),
+    issuedAt: new Date().toISOString(),
+  });
+  return code;
+}
 
 /* Pulls the newest message for `email` out of the dev outbox and
    returns the token from its link, or "" if there is none. */
@@ -420,9 +440,22 @@ section("Password storage");
   const { developmentAuth } = await import(new URL("providers/development-auth.js", LIB));
   const store = await import(new URL("user-store.js", LIB));
 
+  /* Written through this instance of the store, which is the one the
+     provider reads: the shared helper above talks to a different one. */
+  const inviteHere = async (email) => {
+    const { generateInviteCode, hashInviteCode } = await import(new URL("invite.js", LIB));
+    const code = generateInviteCode();
+    await store.putInvite(email, {
+      codeHash: await hashInviteCode(code),
+      issuedAt: new Date().toISOString(),
+    });
+    return code;
+  };
+
   const created = await developmentAuth.signUp({
     firstName: "Store", lastName: "Check", email: at("store.check"),
     password: strong, confirmPassword: strong, siteOrigin: BASE,
+    inviteCode: await inviteHere(at("store.check")),
   });
   check("provider creates the account", created.ok === true, JSON.stringify(created).slice(0, 120));
   check("provider return value has no hash", !("passwordHash" in (created.user || {})),
@@ -439,6 +472,7 @@ section("Password storage");
   const second = await developmentAuth.signUp({
     firstName: "Same", lastName: "Password", email: at("same.password"),
     password: strong, confirmPassword: strong, siteOrigin: BASE,
+    inviteCode: await inviteHere(at("same.password")),
   });
   const other = await store.findUserByEmail(at("same.password"));
   check("identical passwords produce different hashes (per-account salt)",
@@ -582,130 +616,186 @@ section("Existing preview affordance");
   check("preview grants no access to documents", doc.status === 401, doc.status);
 }
 
-/* ================= FORGOT / RESET PASSWORD ================= */
-section("Forgot / reset password");
+/* ================= PASSWORD RESET BY RECOVERY CODE ================= */
+section("Password reset by recovery code");
 
 {
-  const email = at("reset.me");
-  const newPassword = "N3w!Passw0rd";
-
-  /* An account, and a signed-in session that should NOT survive the
-     reset. */
-  const victim = new Client();
-  await victim.primeCsrf();
-  const made = await victim.fetch("/api/auth/signup", { json: {
-    firstName: "Reset", lastName: "Me", email, password: strong, confirmPassword: strong } });
-  check("account for the reset flow is created", made.status === 201, made.status);
-  await confirm(victim, email);
-  await victim.fetch("/api/auth/login", { json: { email, password: strong } });
-  const before = await victim.fetch("/api/auth/session");
-  check("pre-reset session is valid", before.status === 200, before.status);
+  /* With no email, ownership is proven by the code issued at sign-up.
+     The security question this section answers: can someone who knows
+     only an address take over the account? */
+  const email = at("code.reset");
+  const firstPassword = strong;
+  const newPassword = "Rec0very!Pass";
 
   const c = new Client();
   await c.primeCsrf();
+  const made = await c.fetch("/api/auth/signup", { json: {
+    firstName: "Code", lastName: "Reset", email,
+    password: firstPassword, confirmPassword: firstPassword } });
+  check("sign-up succeeds", made.status === 201, made.status);
 
-  const gmail = await c.fetch("/api/auth/forgot", { json: { email: "john@gmail.com" } });
-  check("forgot refuses a non-VTS address", gmail.status === 400 &&
-    gmail.body?.error?.message === "Only VTS email addresses are permitted to access VTS Hub.",
-    gmail.status + " " + gmail.body?.error?.message);
+  const code = made.body?.recoveryCode || "";
+  check("sign-up returns a recovery code", /^VTSH(-[A-Z0-9]{4}){4}$/.test(code), code);
 
-  const unknown = await c.fetch("/api/auth/forgot", { json: { email: at("nobody.here") } });
-  check("forgot for an unknown address still says ok", unknown.status === 200 && unknown.body?.ok === true,
-    unknown.status);
+  /* It is a credential: it must never be retrievable afterwards. */
+  const ctxAfter = await c.fetch("/api/auth/context");
+  check("the code is not in the context response", !JSON.stringify(ctxAfter.body).includes(code));
+  await c.fetch("/api/auth/login", { json: { email, password: firstPassword } });
+  const session = await c.fetch("/api/auth/session");
+  check("the code is not in the session response", !JSON.stringify(session.body).includes(code));
+  await c.fetch("/api/auth/logout", { json: {} });
+  await c.primeCsrf();
 
-  const outboxBefore = (await c.fetch("/__dev/outbox?json")).body.length;
+  /* Stored as a hash, exactly like a password. Read through the same
+     backend the server is using — an unqualified import here would pick
+     the in-memory store and quietly find nothing. */
+  const LIB = new URL("./netlify/edge-functions/lib/", import.meta.url);
+  const dbReady = Boolean(process.env.VTS_DB_HOST && process.env.VTS_DB_NAME && process.env.VTS_DB_USER);
+  if (dbReady) process.env.VTS_AUTH_STORE = "mariadb";
+  const store = await import(new URL("user-store.js?backend=recovery", LIB));
+  const row = await store.findUserByEmail(email);
+  check("only a hash of the code is stored",
+    /^pbkdf2-sha256\$/.test(row?.recoveryCodeHash || ""), String(row?.recoveryCodeHash).slice(0, 22));
+  check("the code itself is nowhere in the record", !JSON.stringify(row).includes(code));
+  check("publicUser() never exposes it", !("recoveryCodeHash" in store.publicUser(row)));
 
-  const known = await c.fetch("/api/auth/forgot", { json: { email: "  " + email.toUpperCase() + " " } });
-  check("forgot for a known address (uppercase, padded) says ok", known.status === 200, known.status);
-  check("known and unknown addresses get the identical response",
-    JSON.stringify(known.body) === JSON.stringify(unknown.body),
-    JSON.stringify(known.body) + " vs " + JSON.stringify(unknown.body));
-  check("forgot response contains no token", !/token/i.test(JSON.stringify(known.body)));
+  /* THE POINT: knowing the address alone is not enough. */
+  const noCode = await c.fetch("/api/auth/reset", { json: {
+    email, recoveryCode: "", password: newPassword, confirmPassword: newPassword } });
+  check("reset with NO code is refused", noCode.status === 400, noCode.status);
+  const wrongCode = await c.fetch("/api/auth/reset", { json: {
+    email, recoveryCode: "VTSH-AAAA-BBBB-CCCC-DDDD",
+    password: newPassword, confirmPassword: newPassword } });
+  check("reset with the WRONG code is refused",
+    wrongCode.status === 400 && wrongCode.body?.error?.code === "RESET_INVALID",
+    wrongCode.status + " " + wrongCode.body?.error?.code);
+  check("the old password still works after a failed attempt",
+    (await c.fetch("/api/auth/login", { json: { email, password: firstPassword } })).status === 200);
+  await c.fetch("/api/auth/logout", { json: {} });
+  await c.primeCsrf();
 
-  const outbox = (await c.fetch("/__dev/outbox?json")).body;
-  check("unknown address sent no mail; known address sent one", outbox.length === outboxBefore + 1,
-    outboxBefore + " -> " + outbox.length);
+  /* One account's code must not open another's. */
+  const other = at("code.other");
+  const o = new Client();
+  await o.primeCsrf();
+  const otherMade = await o.fetch("/api/auth/signup", { json: {
+    firstName: "Other", lastName: "Person", email: other,
+    password: strong, confirmPassword: strong } });
+  const crossed = await c.fetch("/api/auth/reset", { json: {
+    email, recoveryCode: otherMade.body?.recoveryCode,
+    password: newPassword, confirmPassword: newPassword } });
+  check("another account's code does not work", crossed.status === 400, crossed.status);
 
-  const mail = outbox[outbox.length - 1];
-  check("mail is addressed to the account holder", mail?.to === email, mail?.to);
-  const link = (/https?:\/\/\S+/.exec(mail?.text || "") || [])[0] || "";
-  let token = "";
-  try { token = new URL(link).searchParams.get("token") || ""; } catch {}
-  check("mail carries a reset link on this site with a token",
-    link.startsWith(BASE + "/reset?token=") && token.length > 30, link.slice(0, 60));
-
-  const bad = await c.fetch("/api/auth/reset", { json: {
-    token: "not-a-real-token", password: newPassword, confirmPassword: newPassword } });
-  check("reset with a bogus token is refused", bad.status === 400 && bad.body?.error?.code === "RESET_INVALID",
-    bad.status + " " + bad.body?.error?.code);
-
+  /* A weak new password must not spend the code. */
   const weak = await c.fetch("/api/auth/reset", { json: {
-    token, password: "weak", confirmPassword: "weak" } });
-  check("reset with a weak password is refused", weak.status === 400 && weak.body?.error?.code === "PASSWORD_WEAK",
+    email, recoveryCode: code, password: "weak", confirmPassword: "weak" } });
+  check("a weak new password is refused", weak.status === 400 && weak.body?.error?.code === "PASSWORD_WEAK",
     weak.body?.error?.code);
-
   const mismatch = await c.fetch("/api/auth/reset", { json: {
-    token, password: newPassword, confirmPassword: newPassword + "x" } });
-  check("reset with mismatched passwords is refused",
-    mismatch.status === 400 && mismatch.body?.error?.message === "Passwords do not match.",
+    email, recoveryCode: code, password: newPassword, confirmPassword: newPassword + "x" } });
+  check("mismatched new passwords are refused",
+    mismatch.status === 400 && /do not match/i.test(mismatch.body?.error?.message || ""),
     mismatch.body?.error?.message);
 
+  /* The real thing. The code is accepted in the form a person would
+     actually retype it. */
   const done = await c.fetch("/api/auth/reset", { json: {
-    token, password: newPassword, confirmPassword: newPassword } });
-  check("reset with a valid token and a good password succeeds (link survived the typos above)",
-    done.status === 200 && done.body?.next === "/login?reset=1",
-    done.status + " " + JSON.stringify(done.body));
-  check("reset does not sign the browser in", !c.jar.has("vts_session"));
+    email, recoveryCode: code.toLowerCase().replace(/-/g, " "),
+    password: newPassword, confirmPassword: newPassword } });
+  check("the correct code (retyped loosely) resets the password",
+    done.status === 200, done.status + " " + JSON.stringify(done.body?.error || ""));
+  check("...and the typo attempts above did NOT spend it", done.status === 200);
 
-  const again = await c.fetch("/api/auth/reset", { json: {
-    token, password: newPassword, confirmPassword: newPassword } });
-  check("reset link is single-use", again.status === 400 && again.body?.error?.code === "RESET_INVALID",
-    again.status);
+  const nextCode = done.body?.recoveryCode || "";
+  check("a fresh code replaces the one just used",
+    /^VTSH(-[A-Z0-9]{4}){4}$/.test(nextCode) && nextCode !== code, nextCode);
 
-  const oldPw = await c.fetch("/api/auth/login", { json: { email, password: strong } });
-  check("old password no longer works", oldPw.status === 401, oldPw.status);
+  check("the spent code no longer works",
+    (await c.fetch("/api/auth/reset", { json: {
+      email, recoveryCode: code, password: strong, confirmPassword: strong } })).status === 400);
 
-  const after = await victim.fetch("/api/auth/session");
-  check("session that existed before the reset is now invalid", after.status === 401, after.status);
-  const hub = await victim.fetch("/");
-  check("that session can no longer open the hub", hub.status === 302, hub.status);
+  check("the old password no longer works",
+    (await c.fetch("/api/auth/login", { json: { email, password: firstPassword } })).status === 401);
+  const signedIn = await c.fetch("/api/auth/login", { json: { email, password: newPassword } });
+  check("the new password works", signedIn.status === 200, signedIn.status);
+  await c.fetch("/api/auth/logout", { json: {} });
+  await c.primeCsrf();
 
-  const newPw = await c.fetch("/api/auth/login", { json: { email, password: newPassword } });
-  check("new password signs in", newPw.status === 200, newPw.status + " " + JSON.stringify(newPw.body).slice(0, 80));
-  const fresh = await c.fetch("/api/auth/session");
-  check("session issued after the reset is valid", fresh.status === 200, fresh.status);
+  /* Same answer whether or not the address exists, so this cannot be
+     used to discover who is registered. */
+  const unknown = await c.fetch("/api/auth/reset", { json: {
+    email: at("never.registered"), recoveryCode: "VTSH-AAAA-BBBB-CCCC-DDDD",
+    password: newPassword, confirmPassword: newPassword } });
+  check("an unknown address gives the same answer as a wrong code",
+    unknown.status === wrongCode.status &&
+    unknown.body?.error?.message === wrongCode.body?.error?.message,
+    unknown.body?.error?.message);
 
-  /* Three requests per address per window; the fourth is refused. */
-  const limiter = new Client();
-  await limiter.primeCsrf();
-  const target = at("flood.me");
-  let statuses = [];
-  for (let i = 0; i < 4; i++) {
-    statuses.push((await limiter.fetch("/api/auth/forgot", { json: { email: target } })).status);
-  }
-  check("repeated reset requests for one address are rate limited",
-    statuses.slice(0, 3).every((x) => x === 200) && statuses[3] === 429, statuses.join(","));
+  const noVts = await c.fetch("/api/auth/reset", { json: {
+    email: "someone@gmail.com", recoveryCode: code,
+    password: newPassword, confirmPassword: newPassword } });
+  check("a non-VTS address is refused", noVts.status === 400 &&
+    noVts.body?.error?.code === "EMAIL_NOT_ALLOWED", noVts.body?.error?.code);
 
-  const noCsrf = await fetch(BASE + "/api/auth/forgot", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: BASE },
-    body: JSON.stringify({ email }),
+  const noCsrf = await fetch(BASE + "/api/auth/reset", {
+    method: "POST", headers: { "content-type": "application/json", origin: BASE },
+    body: JSON.stringify({ email, recoveryCode: nextCode, password: strong, confirmPassword: strong }),
   });
-  check("forgot requires the CSRF token", noCsrf.status === 403, noCsrf.status);
+  check("reset requires the CSRF token", noCsrf.status === 403, noCsrf.status);
+}
 
-  const loginPage = (await c.fetch("/login")).text;
-  check("/login offers a Forgot password link", /href="\/forgot"[^>]*>Forgot password\?/.test(loginPage));
-  check("/forgot page is reachable", (await c.fetch("/forgot")).status === 200);
-  check("/reset page is reachable", (await c.fetch("/reset")).status === 200);
+section("Reset: guessing the code is rate limited");
+
+{
+  const email = at("guess.target");
+  const c = new Client();
+  await c.primeCsrf();
+  await c.fetch("/api/auth/signup", { json: {
+    firstName: "Guess", lastName: "Target", email, password: strong, confirmPassword: strong } });
+
+  let sawLimit = false;
+  for (let i = 0; i < 12; i++) {
+    const r = await c.fetch("/api/auth/reset", { json: {
+      email, recoveryCode: "VTSH-ZZZZ-ZZZZ-ZZZZ-ZZZ" + (i % 10),
+      password: "Gu3ssing!Pw", confirmPassword: "Gu3ssing!Pw" } });
+    if (r.status === 429) { sawLimit = true; break; }
+  }
+  check("repeated wrong codes for one address are rate limited", sawLimit);
+}
+
+section("Forgot page: a signpost, not a mail form");
+
+{
+  const c = new Client();
+  const page = await c.fetch("/forgot");
+  check("/forgot still loads", page.status === 200, page.status);
+  check("...and points at the reset page", /href="\/reset"/.test(page.text));
+  check("...with no email form left on it", !/id="forgot-form"/.test(page.text));
+
+  /* The route stays, refusing plainly, so an old client gets an honest
+     answer rather than a silent "check your email". */
+  await c.primeCsrf();
+  const legacy = await c.fetch("/api/auth/forgot", { json: { email: at("anyone") } });
+  check("the old forgot route says a code is needed",
+    legacy.status === 400 && legacy.body?.error?.code === "RESET_BY_CODE",
+    legacy.status + " " + legacy.body?.error?.code);
+
+  const reset = await c.fetch("/reset");
+  check("/reset asks for the address and the code",
+    /id="email"/.test(reset.text) && /id="recoveryCode"/.test(reset.text));
+
+  const signup = await c.fetch("/signup");
+  check("/signup has somewhere to show the code", /id="recovery-code"/.test(signup.text));
 }
 
 /* ================= EMAIL VERIFICATION DISABLED ================= */
-section("Email verification is disabled for the temporary auth");
+section("Sign-up while mail cannot get out");
 
 {
-  /* The temporary development auth creates a usable account at once.
-     Mail delivery is therefore not on the sign-up path at all, which is
-     what made this flow testable while the sending domain is unverified. */
+  /* With no working mail, sign-up is by invitation and creates a usable
+     account at once: there is no confirmation to wait for. This is the
+     policy the dev server resolves to, because the sending domain is
+     not verified. The other policy is exercised below. */
   const email = at("no.verification");
   const c = new Client();
   await c.primeCsrf();
@@ -733,8 +823,9 @@ section("Email verification is disabled for the temporary auth");
     resend.status === 400 && resend.body?.error?.code === "VERIFY_NOT_SUPPORTED",
     resend.status + " " + resend.body?.error?.code);
 
-  /* Accounts left unconfirmed while verification WAS required must not
-     be stranded: there is no confirmation mail to wait for any more. */
+  /* Accounts left unconfirmed under an older build, before anything
+     recorded that a confirmation had been asked for, must not be
+     stranded: there is no confirmation mail to wait for any more. */
   const LIB = new URL("./netlify/edge-functions/lib/", import.meta.url);
   const store = await import(new URL("user-store.js", LIB));
   const stranded = at("stranded.before");
@@ -935,7 +1026,10 @@ if (!haveDb) {
   check("server 1 starts on MariaDB", await until(() => /store    mariadb/.test(server.log())));
   const jar = {};
   await rest("/api/auth/context", null, jar);
-  const up = await rest("/api/auth/signup", { firstName: "Still", lastName: "Here", email, password, confirmPassword: password }, jar);
+  const up = await rest("/api/auth/signup", {
+    firstName: "Still", lastName: "Here", email, password, confirmPassword: password,
+    inviteCode: await issueInvite(email),
+  }, jar);
   check("sign up on server 1", up.status === 201, up.status);
   check("sign in on server 1 (no confirmation step needed)",
     (await rest("/api/auth/login", { email, password }, jar)).status === 200);
@@ -979,6 +1073,260 @@ section("Sessions expire; accounts do not");
   check("without a session the hub is refused", (await c.fetch("/")).status === 302);
   check("...but the same email + password sign in again",
     (await c.fetch("/api/auth/login", { json: { email, password: strong } })).status === 200);
+}
+
+/* ================= SECURITY HEADERS ================= */
+section("Security headers");
+
+{
+  /* netlify.toml is read by Netlify and nothing else, so on Plesk the
+     application must set these itself. */
+  const c = new Client();
+  const page = await c.fetch("/login");
+
+  const csp = page.headers.get("content-security-policy") || "";
+  check("Content-Security-Policy is served", csp.length > 0);
+  check("...with no inline-script escape hatch",
+    /script-src 'self'/.test(csp) && !/script-src[^;]*unsafe-inline/.test(csp), csp.slice(0, 70));
+  check("...allowing the two Microsoft hosts MSAL needs",
+    csp.includes("https://login.microsoftonline.com") && csp.includes("https://graph.microsoft.com"));
+  check("...and closing base-uri and object-src",
+    csp.includes("base-uri 'none'") && csp.includes("object-src 'none'"));
+
+  check("X-Frame-Options is served", (page.headers.get("x-frame-options") || "") === "SAMEORIGIN");
+  check("X-Content-Type-Options is served", (page.headers.get("x-content-type-options") || "") === "nosniff");
+  check("X-Robots-Tag keeps the private hub out of search engines",
+    /noindex/.test(page.headers.get("x-robots-tag") || ""), page.headers.get("x-robots-tag"));
+
+  /* HSTS only over HTTPS; the test server is plain HTTP. */
+  check("HSTS is withheld over plain HTTP", !page.headers.has("strict-transport-security"));
+
+  /* Every response, not just HTML. */
+  const asset = await c.fetch("/assets/auth-client.js");
+  check("assets carry the headers too",
+    Boolean(asset.headers.get("content-security-policy")) &&
+    (asset.headers.get("x-content-type-options") || "") === "nosniff", asset.status);
+  const api = await c.fetch("/api/auth/context");
+  check("API responses carry them as well", Boolean(api.headers.get("content-security-policy")));
+
+  /* One CSP, never two â€” duplicates are enforced as the intersection. */
+  const raw = await fetch(BASE + "/login");
+  const all = [...raw.headers].filter(([k]) => k === "content-security-policy");
+  check("exactly one Content-Security-Policy header", all.length === 1, String(all.length));
+}
+
+section("Reset tokens stay out of access logs");
+
+{
+  /* /reset and /verify arrive with a one-time token in the query string.
+     Their stylesheets and scripts are requested before the page strips
+     it, and each of those requests carries the full URL in Referer,
+     which web servers log. no-referrer on those pages closes that. */
+  const c = new Client();
+  for (const path of ["/reset", "/verify"]) {
+    const page = await c.fetch(path);
+    check(path + " sends Referrer-Policy: no-referrer",
+      (page.headers.get("referrer-policy") || "") === "no-referrer",
+      page.headers.get("referrer-policy"));
+  }
+  const ordinary = await c.fetch("/login");
+  check("ordinary pages keep strict-origin-when-cross-origin",
+    (ordinary.headers.get("referrer-policy") || "") === "strict-origin-when-cross-origin",
+    ordinary.headers.get("referrer-policy"));
+
+  const { referrerPolicyFor } = await import(
+    new URL("./netlify/edge-functions/lib/security-headers.js", import.meta.url));
+  check("the .html forms are covered too",
+    referrerPolicyFor("/reset.html") === "no-referrer" &&
+    referrerPolicyFor("/verify.html") === "no-referrer");
+  check("and nothing else is", referrerPolicyFor("/") === "strict-origin-when-cross-origin");
+}
+
+/* ================= INVITATION REQUIRED ================= */
+section("Sign-up is by invitation");
+
+{
+  /* The hole this closes: without a confirmation mail, the @vts.edu
+     rule checks the SHAPE of an address, not that the person owns it.
+     Anyone could otherwise register dean@vts.edu and be inside. */
+  const c = new Client();
+  await c.primeCsrf();
+  const target = at("impostor.target");
+  const signUp = (email, inviteCode) =>
+    c.fetch("/api/auth/signup", { json: {
+      firstName: "Imp", lastName: "Ostor", email,
+      password: strong, confirmPassword: strong, inviteCode } });
+
+  const none = await signUp(target, "");
+  check("a plausible @vts.edu address with NO invitation is refused",
+    none.status === 400 && none.body?.error?.code === "INVITE_REQUIRED",
+    none.status + " " + none.body?.error?.code);
+
+  const missing = await c.fetch("/api/auth/signup", { json: {
+    firstName: "Imp", lastName: "Ostor", email: target,
+    password: strong, confirmPassword: strong, inviteCode: undefined } });
+  check("...and so is one with the field left out entirely",
+    missing.status === 400 && missing.body?.error?.code === "INVITE_REQUIRED",
+    missing.body?.error?.code);
+
+  const madeUp = await signUp(target, "VTSI-AAAA-BBBB");
+  check("a made-up code is refused",
+    madeUp.status === 400 && madeUp.body?.error?.code === "INVITE_INVALID",
+    madeUp.body?.error?.code);
+
+  /* An invitation is bound to one address, so a leaked code is useless
+     for anything else. */
+  const invited = at("genuinely.invited");
+  const code = await issueInvite(invited);
+  const borrowed = await signUp(target, code);
+  check("somebody else's real code does not work for this address",
+    borrowed.status === 400 && borrowed.body?.error?.code === "INVITE_INVALID",
+    borrowed.body?.error?.code);
+  check("the two refusals are worded identically (no invitation fishing)",
+    madeUp.body?.error?.message === borrowed.body?.error?.message);
+
+  check("no account was created by any of that",
+    (await c.fetch("/api/auth/login", { json: { email: target, password: strong } })).status === 401);
+
+  /* The invited person, typing the code as a person would. */
+  const accepted = await signUp(invited, code.toLowerCase().replace(/-/g, " "));
+  check("the invited address, with its own code, succeeds",
+    accepted.status === 201, accepted.status + " " + (accepted.body?.error?.code || ""));
+  check("...and still gets a recovery code",
+    /^VTSH(-[A-Z0-9]{4}){4}$/.test(accepted.body?.recoveryCode || ""));
+
+  /* One invitation, one account. */
+  const reused = await signUp(invited, code);
+  check("the invitation cannot open a second account",
+    reused.status === 409 && reused.body?.error?.code === "ACCOUNT_EXISTS",
+    reused.status + " " + reused.body?.error?.code);
+
+  const other = at("second.attempt");
+  const reusedElsewhere = await signUp(other, code);
+  check("...nor be reused for a different address",
+    reusedElsewhere.status === 400 && reusedElsewhere.body?.error?.code === "INVITE_INVALID",
+    reusedElsewhere.body?.error?.code);
+
+  /* Order of checks: a non-VTS address is refused on the domain rule,
+     which is the truthful reason, not on the invitation. */
+  const gmail = await signUp("someone@gmail.com", await issueInvite("someone@gmail.com"));
+  check("a non-VTS address is still refused on the domain rule",
+    gmail.status === 400 && gmail.body?.error?.code === "EMAIL_NOT_ALLOWED",
+    gmail.body?.error?.code);
+
+  /* Only a hash is stored, as with every other credential here. */
+  const store = await import(new URL("user-store.js?invites", LIB_URL));
+  const fresh = at("hash.check");
+  const freshCode = await issueInvite(fresh);
+  const record = await store.findInvite(fresh);
+  check("only a hash of the invitation is stored",
+    /^pbkdf2-sha256\$/.test(record?.codeHash || ""), String(record?.codeHash).slice(0, 22));
+  check("the invitation code itself is not in the record",
+    !JSON.stringify(record).includes(freshCode));
+
+  /* The pages and the server agree about whether it is needed. */
+  const context = (await c.fetch("/api/auth/context")).body;
+  check("the server reports that an invitation is required",
+    context?.invitation?.required === true, JSON.stringify(context?.invitation));
+  const page = await c.fetch("/signup");
+  check("the sign-up form asks for one", /id="inviteCode"/.test(page.text));
+}
+
+/* ================= SIGN-UP BY EMAIL CONFIRMATION ================= */
+section("Sign-up by email confirmation");
+
+{
+  /* The policy the site moves to on its own the day mail can actually
+     leave it. The shared dev server is (correctly) still on invitations,
+     so this runs in-process with the policy pinned and an outbox
+     installed to catch the message. */
+  const hadPolicy = "VTS_SIGNUP_POLICY" in process.env;
+  const policyBefore = process.env.VTS_SIGNUP_POLICY;
+  const outboxBefore = globalThis.__vtsDevOutbox;
+  process.env.VTS_SIGNUP_POLICY = "email";
+  globalThis.__vtsDevOutbox = [];
+
+  const LIB2 = new URL("./netlify/edge-functions/lib/", import.meta.url);
+  const { developmentAuth: auth } = await import(
+    new URL("providers/development-auth.js?policy=email", LIB2)
+  );
+  /* No query string: the same instance the provider itself imports. */
+  const store2 = await import(new URL("user-store.js", LIB2));
+  const { hashPassword } = await import(new URL("password.js", LIB2));
+
+  const policy = await auth.ready();
+  check("VTS_SIGNUP_POLICY=email pins confirmation by email",
+    policy.name === "email" && policy.emailVerification === true, policy.name);
+  check("...and drops the invitation requirement", policy.invitation === false);
+  check("the pages are told both", auth.describe().emailVerification?.required === true &&
+    auth.describe().invitation?.required === false);
+
+  const email = at("confirm.me");
+  const made = await auth.signUp({
+    firstName: "Con", lastName: "Firm", email,
+    password: strong, confirmPassword: strong, siteOrigin: BASE,
+  });
+  check("no invitation is needed", made.ok === true, made.code || "");
+  check("the holder is told a link is on its way", made.verification === "sent");
+  check("the recovery code is still handed over, once",
+    /^VTSH(-[A-Z0-9]{4}){4}$/.test(made.recoveryCode || ""));
+
+  const early = await auth.signIn({ email, password: strong });
+  check("the account cannot sign in until the link is opened",
+    early.ok === false && early.code === "EMAIL_UNVERIFIED", early.code);
+
+  const message = globalThis.__vtsDevOutbox.find((m) => m.to === email);
+  check("a confirmation message was sent to that address", Boolean(message));
+  const link = /https?:\/\/\S+/.exec(message?.text || "")?.[0] || "";
+  const token = link ? new URL(link).searchParams.get("token") : "";
+  check("it carries a link with a token", Boolean(token));
+
+  const confirmed = await auth.verifyEmail({ token });
+  check("the link confirms the address", confirmed.ok === true, confirmed.code || "");
+  const after = await auth.signIn({ email, password: strong });
+  check("and then it signs in", after.ok === true, after.code || "");
+
+  /* A recovery code proves possession of the code. It must not be a
+     way of confirming an address nobody has proved they can read. */
+  const unproven = at("never.confirmed");
+  const pending = await auth.signUp({
+    firstName: "Pen", lastName: "Ding", email: unproven,
+    password: strong, confirmPassword: strong, siteOrigin: BASE,
+  });
+  check("a second account is created, unconfirmed", pending.ok === true, pending.code || "");
+  const reset = await auth.resetPassword({
+    email: unproven, recoveryCode: pending.recoveryCode,
+    password: "An0ther!Pass2", confirmPassword: "An0ther!Pass2",
+  });
+  check("its recovery code still resets the password", reset.ok === true, reset.code || "");
+  const stillOut = await auth.signIn({ email: unproven, password: "An0ther!Pass2" });
+  check("but the reset does NOT confirm the address",
+    stillOut.ok === false && stillOut.code === "EMAIL_UNVERIFIED", stillOut.code);
+
+  /* Changing the policy must not lock out the people already using the
+     hub. An account made before anything asked for a confirmation is
+     not one that owes a confirmation. */
+  const legacy = at("predates.confirmation");
+  await store2.createUser({
+    email: legacy, passwordHash: await hashPassword(strong),
+    firstName: "Pre", lastName: "Dates", role: "student", emailVerifiedAt: null,
+  });
+  const legacyIn = await auth.signIn({ email: legacy, password: strong });
+  check("an account predating confirmation is not locked out by it",
+    legacyIn.ok === true, legacyIn.code || "");
+
+  /* An unknown value is not obeyed, and does not open sign-up either. */
+  process.env.VTS_SIGNUP_POLICY = "off";
+  const { signupPolicy: bogus } = await import(
+    new URL("providers/development-auth.js?policy=bogus", LIB2)
+  );
+  const fallback = await bogus();
+  check("an unrecognised VTS_SIGNUP_POLICY falls back, never to 'no proof'",
+    fallback.emailVerification === true || fallback.invitation === true, fallback.name);
+
+  globalThis.__vtsDevOutbox = outboxBefore;
+  if (hadPolicy) process.env.VTS_SIGNUP_POLICY = policyBefore;
+  else delete process.env.VTS_SIGNUP_POLICY;
 }
 
 /* ================= SHIPPED ASSETS ================= */

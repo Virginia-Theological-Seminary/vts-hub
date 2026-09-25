@@ -29,8 +29,11 @@
   var mode = form.id.replace(/-form$/, "");
   var isSignup = mode === "signup";
   var wantsNewPassword = mode === "signup" || mode === "reset";
-  var hasEmail = mode !== "reset" && mode !== "verify";
-  var usesLinkToken = mode === "reset" || mode === "verify";
+  /* Reset asks for the address now: with no email to send a link to,
+     the recovery code proves ownership, and the address says of what. */
+  var hasEmail = mode !== "verify";
+  var usesLinkToken = mode === "verify";
+  var usesRecoveryCode = mode === "reset";
 
   /* The one-time token from a reset or confirmation link, held in
      memory only. It is read from the URL once and the URL is then
@@ -58,6 +61,8 @@
     RESET_DONE: "Your password has been updated. Please sign in with your new password.",
     VERIFY_DONE: "Your email address is confirmed. Please sign in.",
     ACCOUNT_CREATED: "Your VTS Hub account has been created successfully. Please sign in.",
+    RECOVERY_REQUIRED: "Please enter the recovery code you saved when you created your account.",
+    INVITE_REQUIRED: "Please enter the invitation code you were given.",
   };
 
   function showAlert(message, kind) {
@@ -89,7 +94,7 @@
   }
 
   function clearFieldErrors() {
-    ["firstName", "lastName", "email", "password", "confirmPassword"].forEach(function (name) {
+    ["firstName", "lastName", "email", "inviteCode", "recoveryCode", "password", "confirmPassword"].forEach(function (name) {
       setFieldError(name, "");
     });
   }
@@ -199,6 +204,15 @@
         setFieldError("firstName", MESSAGES.NAME_REQUIRED);
         firstBad = firstBad || "firstName";
       }
+      /* Asked for only when sign-up actually wants one. It is the
+         field CONTAINER that gets hidden, not the input inside it, so
+         asking the input would demand a code nobody can see. */
+      var invite = el("inviteCode");
+      var inviteBox = el("field-inviteCode") || invite;
+      if (invite && inviteBox && !inviteBox.hidden && !invite.value.trim()) {
+        setFieldError("inviteCode", MESSAGES.INVITE_REQUIRED);
+        firstBad = firstBad || "inviteCode";
+      }
     }
 
     if (hasEmail) {
@@ -209,8 +223,13 @@
       }
     }
 
-    /* The forgot form asks for nothing but an address. */
+    /* The forgot page is a signpost now; it has no form. */
     if (mode === "forgot") return firstBad;
+
+    if (usesRecoveryCode && !el("recoveryCode").value.trim()) {
+      setFieldError("recoveryCode", MESSAGES.RECOVERY_REQUIRED);
+      firstBad = firstBad || "recoveryCode";
+    }
 
     if (!el("password").value) {
       setFieldError("password", MESSAGES.PASSWORD_REQUIRED);
@@ -252,7 +271,8 @@
     }
     if (mode === "reset") {
       return window.VTSAuth.resetPassword({
-        token: linkToken,
+        email: el("email").value,
+        recoveryCode: el("recoveryCode").value,
         password: el("password").value,
         confirmPassword: el("confirmPassword").value,
       });
@@ -265,40 +285,86 @@
       fields.firstName = el("firstName").value;
       fields.lastName = el("lastName").value;
       fields.confirmPassword = el("confirmPassword").value;
+      if (el("inviteCode")) fields.inviteCode = el("inviteCode").value;
       return window.VTSAuth.signUp(fields);
     }
     fields.next = safeNext();
     return window.VTSAuth.signIn(fields);
   }
 
-  /* The "we sent you a link" state, shared by forgot and sign-up. Where
-     to look for the link depends on how mail leaves the site; the server
-     says which, so this page never guesses. */
+  /* Where to look for a message that has just been sent. That depends
+     on how mail leaves the site, which the server reports, so this page
+     never guesses. */
+  function setDeliveryHint(hint, data) {
+    if (!hint) return;
+    hint.textContent = "";
+    if (data.delivery === "outbox") {
+      hint.appendChild(document.createTextNode("Local development: the message is in the "));
+      var link = document.createElement("a");
+      link.href = "/__dev/outbox";
+      link.textContent = "dev outbox";
+      hint.appendChild(link);
+      hint.appendChild(document.createTextNode("."));
+      hint.hidden = false;
+    } else if (data.delivery === "log") {
+      hint.textContent =
+        "While Microsoft Entra sign-in is being configured, links are delivered " +
+        "through the VTS development team. Contact them if it does not arrive.";
+      hint.hidden = false;
+    }
+  }
+
+  /* The "we sent you a link" state, shared by forgot and sign-up. */
   function showSent(data) {
     form.hidden = true;
     var sent = el("sent");
     var message = el("sent-message");
-    var hint = el("sent-hint");
     if (message) message.textContent = data.message || "";
-
-    if (hint) {
-      hint.textContent = "";
-      if (data.delivery === "outbox") {
-        hint.appendChild(document.createTextNode("Local development: the message is in the "));
-        var link = document.createElement("a");
-        link.href = "/__dev/outbox";
-        link.textContent = "dev outbox";
-        hint.appendChild(link);
-        hint.appendChild(document.createTextNode("."));
-        hint.hidden = false;
-      } else if (data.delivery === "log") {
-        hint.textContent =
-          "While Microsoft Entra sign-in is being configured, reset links are " +
-          "delivered through the VTS development team. Contact them if it does not arrive.";
-        hint.hidden = false;
-      }
-    }
+    setDeliveryHint(el("sent-hint"), data);
     if (sent) sent.hidden = false;
+  }
+
+  /* The one moment a recovery code exists outside the server. Shown in
+     place of the form, because there is nothing left to submit and the
+     code cannot be produced again. */
+  function showRecoveryCode(code, data) {
+    var panel = el("recovery");
+    var value = el("recovery-code");
+    if (!panel || !value || !code) return false;
+
+    form.hidden = true;
+    clearAlert();
+    value.textContent = code;
+
+    var cont = el("recovery-continue");
+    if (cont && data.next) cont.href = data.next;
+
+    /* A confirmation link is on its way as well. Both are true at once:
+       the code has to be saved now, and the account opens when the link
+       is opened. Said here rather than on a screen this one replaces. */
+    var verify = el("recovery-verify");
+    if (verify && data.verification === "sent") {
+      verify.textContent = data.message || "";
+      verify.hidden = false;
+      setDeliveryHint(el("recovery-hint"), data);
+      if (cont) cont.textContent = "I've saved it \u2014 continue";
+    }
+
+    var copy = el("recovery-copy");
+    if (copy && navigator.clipboard) {
+      copy.addEventListener("click", function () {
+        navigator.clipboard.writeText(code).then(
+          function () { copy.textContent = "Copied"; },
+          function () { copy.textContent = "Press Ctrl+C to copy"; }
+        );
+      });
+    } else if (copy) {
+      copy.hidden = true;
+    }
+
+    panel.hidden = false;
+    value.focus();
+    return true;
   }
 
   function showDeadLink() {
@@ -323,6 +389,13 @@
     var result = await send();
 
     if (result.ok) {
+      /* Sign-up and reset both hand back a code that is never shown
+         again, so it comes first — ahead of any "check your email",
+         which can be repeated and this cannot. The panel says both. */
+      if (result.data.recoveryCode) {
+        setBusy(false);
+        if (showRecoveryCode(result.data.recoveryCode, result.data)) return;
+      }
       if (mode === "forgot" || (mode === "signup" && result.data.verification === "sent")) {
         setBusy(false);
         showSent(result.data);
@@ -387,7 +460,7 @@
   }
 
   /* Clear a field's error as soon as the user starts fixing it. */
-  ["firstName", "lastName", "email", "password", "confirmPassword"].forEach(function (name) {
+  ["firstName", "lastName", "email", "inviteCode", "recoveryCode", "password", "confirmPassword"].forEach(function (name) {
     var input = el(name);
     if (!input) return;
     input.addEventListener("input", function () {
@@ -468,6 +541,20 @@
 
     var forgotLink = el("forgot-link");
     if (forgotLink && !reset.available) forgotLink.hidden = true;
+
+    /* Sign-up is by invitation while the @vts.edu rule can only check
+       the shape of an address. Under Entra the tenant decides who
+       exists, and the field disappears without this file changing. */
+    var inviteField = el("field-inviteCode");
+    if (inviteField && context.invitation && context.invitation.required === false) {
+      inviteField.hidden = true;
+      var input = el("inviteCode");
+      if (input) {
+        input.required = false;
+        /* Nothing left behind for the server to weigh up. */
+        input.value = "";
+      }
+    }
   }
 
   /* The reset and confirmation pages are only useful with a token. It

@@ -32,43 +32,147 @@ import {
   deleteUser,
   putToken,
   takeToken,
+  findInvite,
+  takeInvite,
 } from "../user-store.js";
 import { DEFAULT_ROLE } from "../roles.js";
-import { sendMail, mailDelivery } from "../mailer.js";
-import { randomId, sha256Hex } from "../runtime.js";
+import { sendMail, mailDelivery, mailCapability } from "../mailer.js";
+import {
+  generateRecoveryCode,
+  hashRecoveryCode,
+  verifyRecoveryCode,
+} from "../recovery-code.js";
+import { verifyInviteCode } from "../invite.js";
+import { env, randomId, sha256Hex } from "../runtime.js";
 
 const deny = (field, code, message) => ({ ok: false, field, code, message });
 
 /* ------------------------------------------------------------------
-   EMAIL VERIFICATION IS INTENTIONALLY DISABLED
+   HOW SIGN-UP PROVES THE ADDRESS BELONGS TO THE PERSON
    ------------------------------------------------------------------
-   Sign-up creates a usable account immediately: no token is minted, no
-   confirmation mail is sent, and the new account can sign in at once.
+   The @vts.edu rule can only check the SHAPE of an address. On its own
+   it would let anyone register dean@vts.edu and be inside. Something
+   has to supply the missing proof, and there are two ways to do it:
 
-   Why: this is temporary development authentication, and requiring a
-   confirmation link made it untestable. Mail can only leave the site
-   once a sending domain is verified with the mail provider, which is a
-   DNS change outside this application. Until then nobody but the mail
-   account's own owner could complete a sign-up.
+     "email"       a confirmation link. The account cannot sign in
+                   until it is opened, so the holder must be able to
+                   read mail at the address. This is the simple, strong
+                   one — only VTS IT can create an @vts.edu mailbox —
+                   and it is the one we want.
 
-   What this costs, stated plainly: the @vts.edu rule now checks the
-   SHAPE of an address, not that the person can read mail at it. Someone
-   could register dean@vts.edu without owning it. That is acceptable for
-   a temporary system whose content is an internal link directory, and
-   it is precisely what Microsoft Entra fixes — Entra authenticates
-   against the real account, so this whole file retires with it.
+     "invitation"  an administrator who knows who they are talking to
+                   issues a code for one named address, out of band
+                   (npm run account -- --invite). Slower, and it needs a
+                   human in the loop, but it works with no mail at all.
 
-   To turn verification back on, set this to true. Everything it needs
-   is still here and still tested: the token minting, the mail, the
-   /verify redemption and the "send it again" path.
+   WHY THIS IS NOT A CONSTANT
+   A confirmation link only proves anything if mail genuinely leaves the
+   server. Ours does not yet: the sending domain's DNS records are not
+   published, so the provider refuses every message. Requiring
+   confirmation today would not make sign-up safer, it would make it
+   impossible — nobody could ever finish one.
+
+   So the policy follows the capability. The server asks the mail
+   provider whether a message can reach somebody other than the mail
+   account's own owner (mailCapability, in mailer.js):
+
+       mail cannot get out  ->  invitation
+       mail can get out     ->  email confirmation
+
+   The day IT publishes those DNS records, the next restart moves to
+   email confirmation by itself: no code change, no deploy, and no
+   window in which sign-up is open with neither proof in force.
+
+   An operator can pin it with VTS_SIGNUP_POLICY:
+
+       auto         follow the mail capability (the default)
+       invitation   invitation codes, whatever mail can do
+       email        confirmation links, whatever mail can do
+
+   The safe default — in force before the question has been answered,
+   and whenever answering it fails — is "invitation", because it is the
+   one that cannot be defeated by mail being broken.
+
+   All of this retires with Microsoft Entra, which authenticates against
+   the real VTS account and makes the question moot.
+
+   PASSWORD RESET IS SEPARATE
+   Resetting a password is always proved by RECOVERY CODE: issued once
+   at sign-up, stored only as a hash, required to set a new password.
+   See recovery-code.js. A reset therefore proves possession of that
+   code; it does not prove ownership of the address, and is not allowed
+   to stand in for it.
    ------------------------------------------------------------------ */
-const EMAIL_VERIFICATION_REQUIRED = false;
+const POLICIES = {
+  invitation: { emailVerification: false, invitation: true },
+  email: { emailVerification: true, invitation: false },
+};
+
+let resolvedPolicy = {
+  ...POLICIES.invitation,
+  name: "invitation",
+  source: "default",
+  reason: "the sign-up policy has not been worked out yet",
+};
+let policyPending = null;
+
+async function resolvePolicy() {
+  const configured = String(env("VTS_SIGNUP_POLICY", "") || "auto").trim().toLowerCase();
+
+  if (Object.prototype.hasOwnProperty.call(POLICIES, configured)) {
+    return {
+      ...POLICIES[configured],
+      name: configured,
+      source: "configured",
+      reason: "VTS_SIGNUP_POLICY=" + configured,
+    };
+  }
+  if (configured !== "auto") {
+    console.warn(
+      "[vts-auth] VTS_SIGNUP_POLICY=" + JSON.stringify(configured) +
+        " is not one of auto, invitation, email — following the mail capability instead"
+    );
+  }
+
+  const mail = await mailCapability();
+  const name = mail.usable ? "email" : "invitation";
+  return { ...POLICIES[name], name, source: "auto", reason: mail.detail };
+}
+
+/* Worked out once and remembered: every sign-up and every load of the
+   sign-up page asks. Restarting re-asks, which is how newly published
+   DNS records take effect. */
+export async function signupPolicy() {
+  if (!policyPending) {
+    policyPending = resolvePolicy().then(
+      (resolved) => {
+        resolvedPolicy = resolved;
+        return resolved;
+      },
+      (err) => {
+        /* Staying on the safe default is the right way to fail: sign-up
+           keeps working, by invitation, and a restart asks again. */
+        console.error("[vts-auth] could not work out the sign-up policy", err);
+        return resolvedPolicy;
+      }
+    );
+  }
+  return policyPending;
+}
+
+/* The policy as last resolved, for describe(), which is synchronous.
+   Anything that must be current awaits signupPolicy() first — the
+   provider's ready() exists for exactly that. */
+export function currentSignupPolicy() {
+  return resolvedPolicy;
+}
 
 /* How long each kind of link stays valid. A reset link is a credential
    for as long as it lives, so it is short. A confirmation link only
    proves inbox access for an account that cannot yet do anything, so
    it can be generous. */
-const RESET_TOKEN_MINUTES = 30;
+/* Only the confirmation link has a lifetime now; password reset is
+   proven by the recovery code, which does not expire. */
 const VERIFY_TOKEN_HOURS = 24;
 
 /* Mints a one-time token for `email`, stores its hash, and mails the
@@ -110,6 +214,13 @@ export const developmentAuth = {
   supportsPasswordSignIn: true,
   supportsPasswordReset: true,
 
+  /* Settles the sign-up policy before anything reads it. Called by the
+     startup banner and by whatever answers /api/auth/context, so the
+     page and the server never disagree about what sign-up asks for. */
+  async ready() {
+    return await signupPolicy();
+  },
+
   /* ---------------- sign up ---------------- */
 
   async signUp(input) {
@@ -135,6 +246,28 @@ export const developmentAuth = {
       return deny("email", "ACCOUNT_EXISTS", MESSAGES.DUPLICATE);
     }
 
+    const policy = await signupPolicy();
+
+    /* Checked before anything is created, and answered identically
+       whether no invitation exists, the code is wrong, or it was issued
+       to somebody else — so this cannot be used to discover who has
+       been invited. The invitation is consumed further down, only once
+       the account is definitely being made. */
+    if (policy.invitation) {
+      if (!String(input.inviteCode ?? "").trim()) {
+        return deny("inviteCode", "INVITE_REQUIRED", MESSAGES.INVITE_REQUIRED);
+      }
+      const invite = await findInvite(email.email);
+      if (!invite || !(await verifyInviteCode(input.inviteCode, invite.codeHash))) {
+        return deny("inviteCode", "INVITE_INVALID", MESSAGES.INVITE_INVALID);
+      }
+    }
+
+    /* The one chance to establish a shared secret with this person.
+       Shown once, never again, and only its hash is kept — so it is
+       worth exactly as much as a password and is treated as one. */
+    const recoveryCode = generateRecoveryCode();
+
     /* input.role is read nowhere. Whatever the form posts, a public
        sign-up produces DEFAULT_ROLE and nothing else. */
     const created = await createUser({
@@ -143,24 +276,43 @@ export const developmentAuth = {
       firstName,
       lastName,
       role: DEFAULT_ROLE,
-      /* Usable immediately while verification is off, so the stored
-         record says what is true rather than "awaiting a confirmation
+      /* Under the invitation policy the account is usable at once, so
+         the stored record says so, rather than "awaiting a confirmation
          that will never be asked for". */
-      emailVerifiedAt: EMAIL_VERIFICATION_REQUIRED ? null : Date.now(),
+      emailVerifiedAt: policy.emailVerification ? null : Date.now(),
+      /* Records that THIS account was made under a policy that owes a
+         confirmation — which is not the same as "has not confirmed".
+         Accounts created before, when none was ever asked for, must not
+         be locked out the day the policy changes under them. */
+      verificationPending: policy.emailVerification,
+      recoveryCodeHash: await hashRecoveryCode(recoveryCode),
     });
 
     if (!created.ok) return deny("email", "ACCOUNT_EXISTS", MESSAGES.DUPLICATE);
 
-    /* Verification off (the default): the account is already usable, so
-       there is nothing to send and nothing to wait for. The holder goes
-       to the sign-in page and proves the password they just chose. */
-    if (!EMAIL_VERIFICATION_REQUIRED) {
+    /* One invitation opens one account. Removed only now, so a failure
+       above leaves it usable for the retry. */
+    if (policy.invitation) {
+      try {
+        await takeInvite(email.email);
+      } catch (err) {
+        console.error("[vts-auth] could not consume the invitation", err);
+      }
+    }
+
+    /* Invitation policy: the account is already usable, so there is
+       nothing to send and nothing to wait for. The holder goes to the
+       sign-in page and proves the password they just chose. */
+    if (!policy.emailVerification) {
       return {
         ok: true,
         user: publicUser(created.user),
         verification: "not-required",
         message: MESSAGES.ACCOUNT_CREATED,
         next: "/login?created=1",
+        /* The only time this value exists in a response. The sign-up
+           page shows it once and the server never returns it again. */
+        recoveryCode,
       };
     }
 
@@ -190,6 +342,11 @@ export const developmentAuth = {
       verification: "sent",
       message: MESSAGES.VERIFY_SENT,
       delivery: mailDelivery(),
+      next: "/login?created=1",
+      /* Handed over even though sign-in is still blocked: this is the
+         only moment it exists, and a confirmation link is not a
+         substitute for it. The page shows both together. */
+      recoveryCode,
     };
   },
 
@@ -213,14 +370,19 @@ export const developmentAuth = {
       return deny("password", "INVALID_CREDENTIALS", MESSAGES.CREDENTIALS);
     }
 
-    /* Only after the password is right, so an unverified account is not
-       revealed to anyone who cannot already sign in to it.
+    /* Only after the password is right, so an unconfirmed account is
+       not revealed to anyone who cannot already sign in to it.
 
-       Skipped while verification is off — and deliberately so for
-       accounts too, not just new ones. Accounts created while it was on
-       and never confirmed would otherwise be locked out for good: there
-       is no confirmation mail to wait for any more. */
-    if (EMAIL_VERIFICATION_REQUIRED && !user.emailVerifiedAt) {
+       The test is on the account, not on today's policy: a confirmation
+       was asked of THIS account and has not been given. Deliberately
+       not "is the policy email today", because the policy can change
+       under an account either way, and neither change should silently
+       let somebody in or shut somebody out.
+
+       Anyone stuck here has two ways out: the confirmation link, sent
+       again from the sign-in page, or an administrator confirming them
+       by hand (npm run account -- --verify). */
+    if (user.verificationPending && !user.emailVerifiedAt) {
       return deny("email", "EMAIL_UNVERIFIED", MESSAGES.EMAIL_UNVERIFIED);
     }
 
@@ -253,7 +415,7 @@ export const developmentAuth = {
     if (!email.ok) return deny(email.field, "EMAIL_NOT_ALLOWED", email.message);
 
     const user = await findUserByEmail(email.email);
-    if (user && !user.emailVerifiedAt) {
+    if (user && user.verificationPending && !user.emailVerifiedAt) {
       try {
         await sendLink(verificationMail(user, siteOrigin));
       } catch (err) {
@@ -277,88 +439,85 @@ export const developmentAuth = {
     if (!user) return deny("token", "VERIFY_INVALID", MESSAGES.VERIFY_INVALID);
 
     if (!user.emailVerifiedAt) {
-      await updateUser(user.email, { emailVerifiedAt: Date.now() });
+      await updateUser(user.email, {
+        emailVerifiedAt: Date.now(),
+        verificationPending: false,
+      });
     }
     return { ok: true, email: user.email, message: MESSAGES.VERIFY_DONE };
   },
 
   /* ---------------- forgot password ---------------- */
 
-  /* Always succeeds from the caller's point of view. Whether the address
-     has an account decides only whether a message is sent — never what
-     the response says — so the form cannot be used to enumerate
-     accounts. The domain rule is the exception, and it gives nothing
-     away: everyone already knows only @vts.edu is admitted. */
-  async requestPasswordReset({ email: rawEmail, siteOrigin }) {
+  /* Without email there is no link to send, so there is nothing to
+     request: the reset page asks for the recovery code directly. This
+     stays, refusing plainly, so that a stale client or an old bookmark
+     gets an honest answer rather than a silent "check your email" for
+     mail that will never come. */
+  async requestPasswordReset({ email: rawEmail }) {
+    const email = validateEmail(rawEmail, "login");
+    if (!email.ok) return deny(email.field, "EMAIL_NOT_ALLOWED", email.message);
+    return deny("email", "RESET_BY_CODE", MESSAGES.RESET_BY_CODE);
+  },
+
+  /* Sets a new password, proven by the recovery code issued at
+     sign-up. Deliberately NOT a link: there is no email to send one to.
+
+     The answer is the same whether the address has no account or the
+     code is wrong — "the email address or recovery code is incorrect" —
+     so this cannot be used to discover which addresses are registered.
+     Rate limiting on the route is what makes guessing the code
+     impractical on top of its own size. */
+  async resetPassword({ email: rawEmail, recoveryCode, password: rawPassword, confirmPassword }) {
     const email = validateEmail(rawEmail, "login");
     if (!email.ok) return deny(email.field, "EMAIL_NOT_ALLOWED", email.message);
 
-    const user = await findUserByEmail(email.email);
-    if (!user) {
-      return { ok: true, message: MESSAGES.RESET_REQUESTED, delivery: mailDelivery() };
-    }
-
-    /* A mail failure is logged, not surfaced: the answer must be the
-       same for every address, and "the provider is down" is an
-       operations problem, not something to tell an unauthenticated
-       caller about one specific account. */
-    try {
-      await sendLink({
-        user,
-        purpose: "reset",
-        path: "/reset",
-        siteOrigin,
-        ttlMs: RESET_TOKEN_MINUTES * 60 * 1000,
-        subject: "Reset your VTS Hub password",
-        body: (link) =>
-          "Hello " + (user.firstName || "") + ",\n\n" +
-          "Someone asked to reset the password for your VTS Hub account. If that was " +
-          "you, open this link within " + RESET_TOKEN_MINUTES + " minutes:\n\n" +
-          link + "\n\n" +
-          "If it was not you, ignore this message \u2014 your password has not changed.\n",
-      });
-    } catch (err) {
-      console.error("[vts-auth] reset mail failed", err);
-    }
-
-    return { ok: true, message: MESSAGES.RESET_REQUESTED, delivery: mailDelivery() };
-  },
-
-  /* Redeems a link. The token is looked up by its hash and consumed on
-     the way — one link, one attempt at a valid password. */
-  async resetPassword({ token, password: rawPassword, confirmPassword }) {
-    const tokenValue = String(token ?? "");
-    if (!tokenValue || tokenValue.length > 200) {
-      return deny("token", "RESET_INVALID", MESSAGES.RESET_INVALID);
-    }
-
-    /* Validate the new password BEFORE consuming the token, so a typo
-       does not burn the link and send the user back to the start. */
+    /* Check the new password BEFORE the code, so a typo in the password
+       does not consume the one code the person has. */
     const password = validatePassword(rawPassword);
     if (!password.ok) return deny(password.field, "PASSWORD_WEAK", password.message);
 
     const match = validatePasswordConfirmation(rawPassword, confirmPassword);
     if (!match.ok) return deny(match.field, "PASSWORD_MISMATCH", match.message);
 
-    const record = await takeToken(await sha256Hex(tokenValue), "reset");
-    if (!record) return deny("token", "RESET_INVALID", MESSAGES.RESET_INVALID);
+    const user = await findUserByEmail(email.email);
 
-    const user = await findUserByEmail(record.email);
-    if (!user) return deny("token", "RESET_INVALID", MESSAGES.RESET_INVALID);
+    /* No account, or an account with no code on it (created before
+       recovery codes existed): spend the same time a real check would,
+       and give the same answer. */
+    if (!user || !user.recoveryCodeHash) {
+      await dummyVerify();
+      return deny("recoveryCode", "RESET_INVALID", MESSAGES.RESET_CODE_INVALID);
+    }
 
-    /* passwordChangedAt is what lets readSession() refuse any session
-       issued before this moment — including one held by whoever made
-       the reset necessary. */
-    /* Opening a reset link proves the same thing a confirmation link
-       does — that this person reads mail at this address — so an
-       unconfirmed account is confirmed by it. */
+    if (!(await verifyRecoveryCode(recoveryCode, user.recoveryCodeHash))) {
+      return deny("recoveryCode", "RESET_INVALID", MESSAGES.RESET_CODE_INVALID);
+    }
+
+    /* Single use. A fresh code is issued in the same write, so the
+       holder is never left without a way back in — and a code seen over
+       someone's shoulder is worthless once it has been used.
+
+       passwordChangedAt is what lets readSession() refuse every session
+       issued before this moment, including one held by whoever made the
+       reset necessary. */
+    const nextCode = generateRecoveryCode();
     await updateUser(user.email, {
       passwordHash: await hashPassword(password.password),
       passwordChangedAt: Date.now(),
-      emailVerifiedAt: user.emailVerifiedAt || Date.now(),
+      recoveryCodeHash: await hashRecoveryCode(nextCode),
+      /* emailVerifiedAt is deliberately left alone. A recovery code
+         proves possession of the code, not ownership of the mailbox;
+         letting a reset confer confirmation would hand anyone who
+         signed up unconfirmed a way to confirm themselves. */
     });
 
-    return { ok: true, email: user.email, message: MESSAGES.RESET_DONE };
+    return {
+      ok: true,
+      email: user.email,
+      message: MESSAGES.RESET_DONE,
+      recoveryCode: nextCode,
+    };
   },
 
   /* What the sign-in and sign-up pages need to know to render
@@ -369,11 +528,12 @@ export const developmentAuth = {
       temporary: true,
       passwordSignIn: true,
       passwordSignUp: true,
-      passwordReset: { available: true, delivery: mailDelivery() },
+      passwordReset: { available: true, method: "recovery-code", delivery: null },
       emailVerification: {
-        required: EMAIL_VERIFICATION_REQUIRED,
+        required: resolvedPolicy.emailVerification,
         delivery: mailDelivery(),
       },
+      invitation: { required: resolvedPolicy.invitation },
       notice:
         "Temporary development sign-in. Accounts created here are for building and " +
         "testing the hub only and are not VTS Microsoft 365 accounts.",

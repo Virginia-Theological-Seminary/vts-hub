@@ -204,6 +204,43 @@ a.btn-primary { text-decoration: none; margin-top: 4px; }
   text-align: center;
 }
 
+/* ---------- the recovery code, shown once ---------- */
+
+/* Deliberately the loudest thing on the page: it is shown once and
+   cannot be recovered, so it should not read as an afterthought. */
+.recovery-heading {
+  margin: 20px 0 6px;
+  font-size: 16px;
+  color: var(--brand);
+}
+.recovery-why {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.recovery-code {
+  margin: 0 0 12px;
+  padding: 16px 12px;
+  border: 1px dashed var(--brand);
+  border-radius: 10px;
+  background: var(--brand-wash);
+  color: var(--brand-dark);
+  font: 600 18px/1.4 ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: .04em;
+  text-align: center;
+  /* People select this to copy it. */
+  user-select: all;
+  word-break: break-all;
+}
+.recovery-code:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.recovery-copy { display: block; margin: 0 auto 18px; }
+
 /* ---------- form-level message ---------- */
 
 .auth-alert {

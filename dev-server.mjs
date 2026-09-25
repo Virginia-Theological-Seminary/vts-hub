@@ -295,6 +295,14 @@ try {
 const { mailPreflight } = await load("netlify/edge-functions/lib/mailer.js");
 const mailNotes = await mailPreflight();
 
+/* What sign-up will ask for follows from the answer above, so it is
+   worked out here and printed — it is the first thing to check when
+   sign-up does not behave as expected. */
+const { signupPolicy } = await load(
+  "netlify/edge-functions/lib/providers/development-auth.js"
+);
+const policy = await signupPolicy();
+
 const port = Number(process.env.PORT || 8888);
 
 const server = http.createServer(async (req, res) => {
@@ -334,5 +342,12 @@ server.listen(port, () => {
     console.log("  mail     outbox off but Resend not configured — links will print here");
   }
   for (const note of mailNotes) console.log("  mail     " + note);
+  console.log(
+    "  sign-up  " +
+      (policy.emailVerification
+        ? "open to any @vts.edu address, confirmed by email"
+        : "by invitation — npm run account -- --invite someone@vts.edu") +
+      " (" + policy.source + ": " + policy.reason + ")"
+  );
   console.log("");
 });

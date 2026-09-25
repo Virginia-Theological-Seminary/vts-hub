@@ -35,7 +35,20 @@ export const MESSAGES = {
     "It expires in 30 minutes.",
   RESET_INVALID:
     "This password reset link is invalid or has expired. Please request a new one.",
+  /* Deliberately one message for "no such account" and "wrong code", so
+     the form cannot be used to find out which addresses are registered. */
+  RESET_CODE_INVALID:
+    "The email address or recovery code is incorrect. Please check both and try again.",
+  RESET_BY_CODE:
+    "Resetting your password needs the recovery code you saved when you created your account.",
   RESET_DONE: "Your password has been updated. Please sign in with your new password.",
+  INVITE_REQUIRED:
+    "Creating a VTS Hub account needs an invitation code. Ask the VTS development team for one.",
+  /* Deliberately one message for "no invitation", "wrong code" and
+     "issued to a different address", so the form cannot be used to
+     work out which addresses have been invited. */
+  INVITE_INVALID:
+    "That invitation code is not valid for this email address. Please check both with whoever sent it to you.",
   /* Shown on the sign-in page after a successful sign-up, while email
      verification is disabled for the temporary development auth. */
   ACCOUNT_CREATED:
