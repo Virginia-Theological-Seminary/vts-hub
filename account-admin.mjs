@@ -93,12 +93,21 @@ function usage() {
 
   Connection: VTS_AUTH_STORE and VTS_DB_HOST / PORT / NAME / USER /
   PASSWORD, from the environment or a .env file in this directory.
+
+  If npm mangles the flags (it can, on Windows), run the script
+  directly and they always arrive intact:
+
+      node account-admin.mjs --invite someone@vts.edu
 `);
 }
 
 function parseArgs(argv) {
   const opts = {};
+  /* Arguments that arrived without a flag in front of them. Usually a
+     mistake; sometimes the only surviving trace of one — see below. */
+  const loose = [];
   const next = () => argv.shift();
+
   while (argv.length) {
     const arg = next();
     switch (arg) {
@@ -113,16 +122,46 @@ function parseArgs(argv) {
         if (arg.startsWith("--")) {
           console.error("  Unknown option: " + arg);
           opts.help = true;
+        } else {
+          loose.push(arg);
         }
     }
   }
-  /* npm passes `npm run account -- --code x` through intact, but
-     `npm run account --code=x` arrives as an npm_config_ variable. */
-  if (!opts.invite && process.env.npm_config_invite) opts.invite = process.env.npm_config_invite;
-  if (!opts.verify && process.env.npm_config_verify) opts.verify = process.env.npm_config_verify;
-  if (!opts.code && process.env.npm_config_code) opts.code = process.env.npm_config_code;
-  if (!opts.remove && process.env.npm_config_delete) opts.remove = process.env.npm_config_delete;
+
+  /* npm does not reliably hand `npm run account -- --invite x` to the
+     script intact. Depending on the shell and the npm version it can
+     swallow the flag as one of its OWN config options, which leaves
+     npm_config_invite="true" in the environment and the address behind
+     as a bare argument. The script then saw a request to invite
+     somebody called "true", which is precisely the unhelpful thing it
+     did to the first person who tried it.
+
+     Both shapes are recovered here: a real value passed as npm config
+     (`--invite=x`), and a flag eaten with its address stranded. */
+  const fromNpm = [
+    ["invite", "invite"],
+    ["verify", "verify"],
+    ["code", "code"],
+    ["delete", "remove"],
+  ];
+  for (const [flag, key] of fromNpm) {
+    if (opts[key]) continue;
+    const value = process.env["npm_config_" + flag];
+    if (!value) continue;
+    /* "true" is npm saying it took the flag, not an address. */
+    opts[key] = value === "true" ? loose.shift() : value;
+  }
   if (process.env.npm_config_list) opts.list = true;
+
+  /* Anything still loose was never claimed by a flag. Say so rather
+     than silently doing nothing with it. */
+  if (loose.length && !opts.help) {
+    console.error(
+      "\n  Not sure what to do with: " + loose.join(" ") +
+        "\n  Every address needs a flag in front of it — see below.\n"
+    );
+    opts.help = true;
+  }
   return opts;
 }
 
