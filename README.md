@@ -137,12 +137,40 @@ the sign-in and sign-up pages says Entra is still being configured.
   enforces, because it is sent the server's own list.
 - New accounts get the role `student`. The sign-up form cannot ask for any
   other role — the request body's `role` field is never read.
-- A new account **cannot sign in until its address is confirmed.** Sign-up sends
-  a one-time link (valid 24 hours) to the address; `/verify` redeems it. This is
-  what stops someone registering as `dean@vts.edu` — the domain rule checks the
-  shape of the address, the link checks that the person can read its mail. The
-  sign-in page offers to send the link again, and completing a password reset
-  confirms the address too, since it proves the same thing.
+- **Sign-up asks for proof that the address is yours.** The domain rule only
+  checks the *shape* of an address, so on its own it would let anyone register
+  `dean@vts.edu`. One of two things supplies the missing proof:
+
+  | Policy | How it proves it | In force when |
+  |---|---|---|
+  | `email` | a one-time confirmation link, valid 24 hours; the account cannot sign in until `/verify` redeems it | mail can actually be delivered |
+  | `invitation` | a code issued per address, out of band, by `npm run account -- --invite` | mail cannot |
+
+  **The server chooses between them, and re-chooses on every restart.** A
+  confirmation link only proves anything if mail genuinely leaves the server, so
+  at startup it asks the mail provider whether a message can reach anybody other
+  than the mail account's own owner, and sets the policy from the answer. The
+  startup log says which is in force and why:
+
+  ```
+  sign-up  by invitation — npm run account -- --invite someone@vts.edu
+           (auto: MAIL_FROM uses Resend's test sender, which Resend delivers
+           ONLY to the address that owns the Resend account)
+  ```
+
+  Today that answer is *no* — the sending domain's DNS records are not published
+  (see [Going live](#going-live-without-entra)) — so sign-up is by invitation.
+  **The day those records are published, the next restart moves to email
+  confirmation on its own**: no code change, no deploy, and no moment in which
+  sign-up is open with neither proof in force. `VTS_SIGNUP_POLICY` pins either
+  one if you need to; requiring confirmation while mail is broken would make
+  sign-up impossible rather than safer, which is why `auto` is the default.
+
+  Anyone stranded mid-confirmation — signed up while a link was required, never
+  received it — is confirmed by hand with `npm run account -- --verify`, after a
+  human has checked who they are. An account created *before* anything asked for
+  a confirmation is not one that owes a confirmation, and changing the policy
+  never locks those out.
 - Passwords are hashed with **PBKDF2-HMAC-SHA-256, 210,000 iterations**, with a
   per-account random salt. Argon2id and bcrypt would both be better, but each
   needs a native or WASM module that the Netlify Edge runtime could only fetch
@@ -156,29 +184,35 @@ free to disagree.
 
 ### Forgot password
 
-`/forgot` asks for an address and sends a one-time reset link; `/reset` takes
-the link and a new password. The shape is the standard one, because the obvious
-shortcut — enter your email, type a new password — would let anyone who knew an
-address take the account:
+Resetting a password has to prove the person asking owns the account —
+otherwise anyone who knew an address could take one that already exists, which
+is worse than sign-up being open. That proof is a **recovery code**, not a
+mailed link, so it works whether or not mail does.
 
-- The response to a request is **the same whether or not the address has an
-  account**, so the form cannot be used to find out which addresses are real.
-  Three requests per address per 15 minutes.
-- The link carries 32 random bytes; only their **SHA-256 is stored**, so a copy
-  of the store cannot reset anyone's password. It expires in **30 minutes** and
-  works **once** — a second click, or a replayed link, finds nothing.
-- The reset page takes the token out of the URL on load and rewrites the address
-  bar without it. Page is `no-store`; the site-wide `Referrer-Policy` keeps the
-  token out of any Referer that leaves the site.
-- A typo in the new password does not burn the link — the password is checked
-  before the token is consumed.
-- A successful reset **ends every session that existed at the time**, including
-  one held by whoever made the reset necessary, and clears any sign-in lockout on
-  the address. The user is sent to `/login` to prove the new password by using
-  it; no session is minted from a link that arrived by email.
+- The code is issued **once, at sign-up**, in the shape
+  `VTSH-XXXX-XXXX-XXXX-XXXX`. It is shown on screen immediately after the
+  account is created and **never again**: only a PBKDF2 hash of it is stored, so
+  nobody — including whoever runs the server — can produce it later.
+- `/reset` takes the address, the code and a new password. `/forgot` is a
+  signpost to it, not a form: there is nothing to send.
+- A typo in the new password does not burn the code — the password is checked
+  **before** the code is consumed.
+- The code works **once**, and a fresh one is issued in the same write, so the
+  holder is never left without a way back in and a code read over a shoulder is
+  worthless after use. Attempts per address are rate limited.
+- A reset **ends every session that existed at the time**, including one held by
+  whoever made the reset necessary, and clears any sign-in lockout on the
+  address. The user is sent to `/login` to prove the new password by using it.
+- A reset does **not** confirm the address. The code proves possession of the
+  code, not that anyone can read mail at the address; letting it confer
+  confirmation would hand an unconfirmed account a way to confirm itself.
+- Lost the code, with no way to prove anything? That needs a human:
+  `npm run account -- --code someone@vts.edu` issues a new one and prints it,
+  for an administrator to hand over having checked who they are talking to. The
+  administrator never sees or chooses anyone's password.
 
-**How links get to the user** — confirmation and reset alike — is decided in
-`lib/mailer.js`, in this order:
+**How confirmation links get to the user** is decided in `lib/mailer.js`, in
+this order:
 
 - On the **local dev server**, every message is captured and shown at
   `/__dev/outbox` (the way Mailpit would). The pages link to it.
@@ -188,6 +222,14 @@ address take the account:
 - **Otherwise**, the message is written to the edge-function log, which site
   collaborators can read and pass on. Crude, but secure: the link never goes back
   to the browser that asked for it.
+
+The same module answers the question the sign-up policy turns on — *can a
+message reach anybody but the mail account's own owner?* — so the policy and the
+startup warnings can never disagree. The local outbox deliberately answers
+**no**: it captures messages, it does not deliver them, and a development server
+that behaved unlike the server it stands in for would be worse than useless. To
+work on the confirmation flow locally, set `VTS_SIGNUP_POLICY=email` and read
+the link in the outbox.
 
 Swapping Resend for another provider is the body of one function. Under Entra
 none of this is used: Microsoft confirms addresses by their existing and handles
@@ -260,6 +302,33 @@ FROM vts_hub_store WHERE kind = 'user';
 ```
 
 Nothing in it can be used to sign in. It is dropped when Entra takes over.
+
+### Administering accounts
+
+`npm run account` is a command-line tool for whoever has access to the server.
+It is not published and not served — only `site/` is — and it refuses to run
+against the in-memory store, where it would be editing a copy that disappears.
+
+```bash
+npm run account -- --list                      # every account, and which cannot sign in yet
+npm run account -- --invite someone@vts.edu    # let that address create an account
+npm run account -- --verify someone@vts.edu    # confirm an address by hand
+npm run account -- --code   someone@vts.edu    # issue a replacement recovery code
+npm run account -- --delete someone@vts.edu    # remove an account
+```
+
+`--invite` and `--verify` are two halves of the same job under the two sign-up
+policies, and the tool refuses whichever one is not in force rather than
+handing over a code that would silently do nothing.
+
+Confirming who you are talking to is the human's job here. The tool cannot do
+it, and a code given to the wrong person is a given-away account. Note what
+`--code` deliberately does *not* do: it never sets anyone's password. The
+administrator hands over a code, the account holder chooses their own password
+at `/reset`, and nobody but the holder has ever held it.
+
+Retires with Entra, where accounts and forgotten passwords are Microsoft's
+business.
 
 ### Database migrations
 
@@ -366,20 +435,28 @@ hosting; this section is the application's side of it.
 3. **Verify a sending domain in Resend.** In Resend → *Domains*, add the domain
    (`hub.vts.edu` is already added) and publish the DNS records it shows — a DKIM
    `TXT` on `resend._domainkey.<domain>` and two `CNAME`s on `send.<domain>` and
-   `rsend.<domain>`. Ironistic manages the zone. Until Resend shows the domain
+   `rsend.<domain>`. **The `vts.edu` zone is held by FDS** (the nameservers are
+   `ns1`/`ns2.focusdatasolutions.com`), not by Ironistic, who host the site —
+   asking the wrong one of the two costs days. Until Resend shows the domain
    **verified**, nobody but the Resend account's owner receives any mail: the test
    sender `onboarding@resend.dev` is refused for every other recipient, and an
    unverified domain is refused for everyone. That was the September 2026 "my
    colleague never got the email" incident. The server names either condition
    in its startup log as a `mail WARNING`.
 
-4. **Read the startup log after every deploy.** Four lines matter:
+   Publishing these records does one more thing: at the next restart the server
+   sees that mail can reach anybody, and sign-up moves from invitation codes to
+   email confirmation by itself. Expect the `sign-up` line in the startup log to
+   change, and expect to stop issuing invitations.
+
+4. **Read the startup log after every deploy.** Five lines matter:
 
    ```
    mode     production
    store    mariadb — accounts persist
    mail     sending for real through Resend, from VTS Hub <noreply@hub.vts.edu>
    mail     Resend domain hub.vts.edu verified — mail can reach any address
+   sign-up  open to any @vts.edu address, confirmed by email (auto: ...)
    ```
 
    `store memory`, or any `FATAL` or `mail WARNING` line, means the site is

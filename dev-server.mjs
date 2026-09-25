@@ -26,6 +26,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { applySecurityHeaders } from "./netlify/edge-functions/lib/security-headers.js";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const siteDir = path.join(root, "site");
@@ -247,7 +248,11 @@ function toRequest(req, origin) {
   });
 }
 
-async function send(response, res) {
+async function send(response, res, { pathname = "/", secure = true } = {}) {
+  /* Reassigned, not just mutated: a redirect's headers are immutable,
+     so applySecurityHeaders hands back a rebuilt response for those. */
+  response = applySecurityHeaders(response, { pathname, secure });
+
   const headers = {};
   response.headers.forEach((value, key) => {
     if (key !== "set-cookie") headers[key] = value;
@@ -290,6 +295,14 @@ try {
 const { mailPreflight } = await load("netlify/edge-functions/lib/mailer.js");
 const mailNotes = await mailPreflight();
 
+/* What sign-up will ask for follows from the answer above, so it is
+   worked out here and printed — it is the first thing to check when
+   sign-up does not behave as expected. */
+const { signupPolicy } = await load(
+  "netlify/edge-functions/lib/providers/development-auth.js"
+);
+const policy = await signupPolicy();
+
 const port = Number(process.env.PORT || 8888);
 
 const server = http.createServer(async (req, res) => {
@@ -301,7 +314,11 @@ const server = http.createServer(async (req, res) => {
     const ip = req.socket.remoteAddress || "127.0.0.1";
     const response = await route(request, url, ip);
     console.log("  " + req.method.padEnd(5), response.status, url.pathname);
-    await send(response, res);
+    /* Behind Plesk's nginx and Apache the connection to Node is plain
+       HTTP; X-Forwarded-Proto carries what the browser actually used. */
+    const secure =
+      req.headers["x-forwarded-proto"] === "https" || Boolean(req.socket.encrypted);
+    await send(response, res, { pathname: url.pathname, secure });
   } catch (err) {
     console.error("  " + req.method.padEnd(5), 500, url.pathname, err);
     res.writeHead(500, { "content-type": "text/plain" });
@@ -325,5 +342,12 @@ server.listen(port, () => {
     console.log("  mail     outbox off but Resend not configured — links will print here");
   }
   for (const note of mailNotes) console.log("  mail     " + note);
+  console.log(
+    "  sign-up  " +
+      (policy.emailVerification
+        ? "open to any @vts.edu address, confirmed by email"
+        : "by invitation — npm run account -- --invite someone@vts.edu") +
+      " (" + policy.source + ": " + policy.reason + ")"
+  );
   console.log("");
 });
