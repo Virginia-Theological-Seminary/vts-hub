@@ -29,6 +29,7 @@ import {
   createUser,
   updateUser,
   publicUser,
+  deleteUser,
   putToken,
   takeToken,
 } from "../user-store.js";
@@ -122,13 +123,22 @@ export const developmentAuth = {
     if (!created.ok) return deny("email", "ACCOUNT_EXISTS", MESSAGES.DUPLICATE);
 
     /* The account exists but cannot sign in until the holder opens the
-       link. If the mail cannot be sent the account is still kept — the
-       holder can ask for the link again from the sign-in page — but the
-       sign-up is reported as failed so they know to. */
+       link. If the mail cannot be sent, the half-made account is removed
+       again: it could not be used, and leaving it would occupy the
+       address — the next attempt would be told "an account already
+       exists, please sign in instead", which is advice that leads
+       nowhere. Removing it makes "please try again" true. */
     try {
       await sendLink(verificationMail(created.user, input.siteOrigin));
     } catch (err) {
       console.error("[vts-auth] verification mail failed for a new account", err);
+      try {
+        await deleteUser(created.user.email);
+      } catch (cleanupError) {
+        /* Worth knowing about, but the sign-up has already failed and
+           the message to the user does not change. */
+        console.error("[vts-auth] could not remove the unsent account", cleanupError);
+      }
       return deny("email", "MAIL_FAILED", MESSAGES.MAIL_FAILED);
     }
 

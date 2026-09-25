@@ -1013,6 +1013,134 @@ section("Sessions expire; accounts do not");
     (await c.fetch("/api/auth/login", { json: { email, password: strong } })).status === 200);
 }
 
+/* ================= SECURITY HEADERS ================= */
+section("Security headers");
+
+{
+  /* netlify.toml is read by Netlify and nothing else, so on Plesk the
+     application must set these itself. */
+  const c = new Client();
+  const page = await c.fetch("/login");
+
+  const csp = page.headers.get("content-security-policy") || "";
+  check("Content-Security-Policy is served", csp.length > 0);
+  check("...with no inline-script escape hatch",
+    /script-src 'self'/.test(csp) && !/script-src[^;]*unsafe-inline/.test(csp), csp.slice(0, 70));
+  check("...allowing the two Microsoft hosts MSAL needs",
+    csp.includes("https://login.microsoftonline.com") && csp.includes("https://graph.microsoft.com"));
+  check("...and closing base-uri and object-src",
+    csp.includes("base-uri 'none'") && csp.includes("object-src 'none'"));
+
+  check("X-Frame-Options is served", (page.headers.get("x-frame-options") || "") === "SAMEORIGIN");
+  check("X-Content-Type-Options is served", (page.headers.get("x-content-type-options") || "") === "nosniff");
+  check("X-Robots-Tag keeps the private hub out of search engines",
+    /noindex/.test(page.headers.get("x-robots-tag") || ""), page.headers.get("x-robots-tag"));
+
+  /* HSTS only over HTTPS; the test server is plain HTTP. */
+  check("HSTS is withheld over plain HTTP", !page.headers.has("strict-transport-security"));
+
+  /* Every response, not just HTML. */
+  const asset = await c.fetch("/assets/auth-client.js");
+  check("assets carry the headers too",
+    Boolean(asset.headers.get("content-security-policy")) &&
+    (asset.headers.get("x-content-type-options") || "") === "nosniff", asset.status);
+  const api = await c.fetch("/api/auth/context");
+  check("API responses carry them as well", Boolean(api.headers.get("content-security-policy")));
+
+  /* One CSP, never two — duplicates are enforced as the intersection. */
+  const raw = await fetch(BASE + "/login");
+  const all = [...raw.headers].filter(([k]) => k === "content-security-policy");
+  check("exactly one Content-Security-Policy header", all.length === 1, String(all.length));
+}
+
+section("Reset tokens stay out of access logs");
+
+{
+  /* /reset and /verify arrive with a one-time token in the query string.
+     Their stylesheets and scripts are requested before the page strips
+     it, and each of those requests carries the full URL in Referer,
+     which web servers log. no-referrer on those pages closes that. */
+  const c = new Client();
+  for (const path of ["/reset", "/verify"]) {
+    const page = await c.fetch(path);
+    check(path + " sends Referrer-Policy: no-referrer",
+      (page.headers.get("referrer-policy") || "") === "no-referrer",
+      page.headers.get("referrer-policy"));
+  }
+  const ordinary = await c.fetch("/login");
+  check("ordinary pages keep strict-origin-when-cross-origin",
+    (ordinary.headers.get("referrer-policy") || "") === "strict-origin-when-cross-origin",
+    ordinary.headers.get("referrer-policy"));
+
+  const { referrerPolicyFor } = await import(
+    new URL("./netlify/edge-functions/lib/security-headers.js", import.meta.url));
+  check("the .html forms are covered too",
+    referrerPolicyFor("/reset.html") === "no-referrer" &&
+    referrerPolicyFor("/verify.html") === "no-referrer");
+  check("and nothing else is", referrerPolicyFor("/") === "strict-origin-when-cross-origin");
+}
+
+section("Sign-up recovers when the mail cannot be sent");
+
+{
+  /* The failure users hit while the sending domain is unverified: the
+     account must not be left occupying the address. */
+  const LIB = new URL("./netlify/edge-functions/lib/", import.meta.url);
+  const { developmentAuth } = await import(new URL("providers/development-auth.js", LIB));
+  const store = await import(new URL("user-store.js", LIB));
+
+  const email = at("mail.fails");
+  const realFetch = globalThis.fetch;
+  const savedOutbox = globalThis.__vtsDevOutbox;
+  const savedKey = process.env.RESEND_API_KEY;
+  const savedFrom = process.env.MAIL_FROM;
+
+  /* Force the Resend path, and make the provider refuse — the 403 a
+     real unverified domain returns. */
+  delete globalThis.__vtsDevOutbox;
+  process.env.RESEND_API_KEY = "test-key";
+  process.env.MAIL_FROM = "VTS Hub <noreply@example.invalid>";
+  globalThis.fetch = async (url, init) =>
+    String(url).includes("api.resend.com/emails")
+      ? new Response('{"statusCode":403,"message":"domain is not verified"}', { status: 403 })
+      : realFetch(url, init);
+
+  let result;
+  try {
+    result = await developmentAuth.signUp({
+      firstName: "Mail", lastName: "Fails", email,
+      password: strong, confirmPassword: strong, siteOrigin: BASE,
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+    if (savedOutbox !== undefined) globalThis.__vtsDevOutbox = savedOutbox;
+    if (savedKey === undefined) delete process.env.RESEND_API_KEY; else process.env.RESEND_API_KEY = savedKey;
+    if (savedFrom === undefined) delete process.env.MAIL_FROM; else process.env.MAIL_FROM = savedFrom;
+  }
+
+  check("sign-up reports the mail failure", result.ok === false && result.code === "MAIL_FAILED", result.code);
+  check("...and the message says to try again",
+    /try again/i.test(result.message || ""), result.message);
+  check("the half-made account is NOT left behind",
+    (await store.findUserByEmail(email)) === null,
+    "a record for " + email + " survived");
+
+  /* The point of the fix: trying again actually works. */
+  const retry = await developmentAuth.signUp({
+    firstName: "Mail", lastName: "Fails", email,
+    password: strong, confirmPassword: strong, siteOrigin: BASE,
+  });
+  check("trying again succeeds rather than 'account already exists'",
+    retry.ok === true, retry.code + " " + (retry.message || ""));
+
+  /* And a genuine duplicate is still refused. */
+  const dup = await developmentAuth.signUp({
+    firstName: "Mail", lastName: "Fails", email,
+    password: strong, confirmPassword: strong, siteOrigin: BASE,
+  });
+  check("a real duplicate is still refused", dup.ok === false && dup.code === "ACCOUNT_EXISTS", dup.code);
+}
+
 /* ================= SHIPPED ASSETS ================= */
 section("Shipped assets");
 

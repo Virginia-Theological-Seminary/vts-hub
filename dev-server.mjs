@@ -26,6 +26,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { applySecurityHeaders } from "./netlify/edge-functions/lib/security-headers.js";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const siteDir = path.join(root, "site");
@@ -247,7 +248,11 @@ function toRequest(req, origin) {
   });
 }
 
-async function send(response, res) {
+async function send(response, res, { pathname = "/", secure = true } = {}) {
+  /* Reassigned, not just mutated: a redirect's headers are immutable,
+     so applySecurityHeaders hands back a rebuilt response for those. */
+  response = applySecurityHeaders(response, { pathname, secure });
+
   const headers = {};
   response.headers.forEach((value, key) => {
     if (key !== "set-cookie") headers[key] = value;
@@ -301,7 +306,11 @@ const server = http.createServer(async (req, res) => {
     const ip = req.socket.remoteAddress || "127.0.0.1";
     const response = await route(request, url, ip);
     console.log("  " + req.method.padEnd(5), response.status, url.pathname);
-    await send(response, res);
+    /* Behind Plesk's nginx and Apache the connection to Node is plain
+       HTTP; X-Forwarded-Proto carries what the browser actually used. */
+    const secure =
+      req.headers["x-forwarded-proto"] === "https" || Boolean(req.socket.encrypted);
+    await send(response, res, { pathname: url.pathname, secure });
   } catch (err) {
     console.error("  " + req.method.padEnd(5), 500, url.pathname, err);
     res.writeHead(500, { "content-type": "text/plain" });

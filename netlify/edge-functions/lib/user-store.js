@@ -246,6 +246,16 @@ export async function updateUser(email, patch) {
   return next;
 }
 
+/* Removes an account outright. Used when a sign-up cannot be completed
+   — the verification mail is refused, say — so the address is left free
+   for the person to try again, rather than occupied by a record they
+   can neither use nor replace. Not a general "delete my account"
+   feature: that would need its own confirmation flow. */
+export async function deleteUser(email) {
+  const store = await backend();
+  await store.delete(await keyFor(email));
+}
+
 /* ---------------- one-time tokens ---------------- */
 
 /* Used for both password resets and email verification. The token
