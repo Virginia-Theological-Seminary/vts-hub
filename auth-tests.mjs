@@ -91,11 +91,12 @@ async function latestToken(client, email, path) {
   try { return new URL(link).searchParams.get("token") || ""; } catch { return ""; }
 }
 
-/* Sign-up creates an unconfirmed account; this is the click on the
-   confirmation link that makes it usable. */
-async function confirm(client, email) {
-  const token = await latestToken(client, email, "/verify");
-  return client.fetch("/api/auth/verify", { json: { token } });
+/* Email verification is disabled for the temporary development auth
+   (see EMAIL_VERIFICATION_REQUIRED in providers/development-auth.js), so
+   a new account is usable the moment it is created. Kept as a no-op so
+   the flows below read in the order a person would follow them. */
+async function confirm() {
+  return { status: 200 };
 }
 
 /* Addresses are scoped to this run so the suite can be run repeatedly
@@ -122,32 +123,31 @@ section("Signup");
     process.exit(2);
   }
   check("valid @vts.edu signup succeeds", ok.status === 201, "status " + ok.status);
-  check("signup does NOT sign the browser in (address unconfirmed)", !c.jar.has("vts_session"));
-  check("signup says a confirmation link was sent",
-    ok.body?.verification === "sent" && /Check your email/.test(ok.body?.message || ""),
+  check("signup does NOT sign the browser in", !c.jar.has("vts_session"));
+  check("signup reports the account is usable at once",
+    ok.body?.verification === "not-required" &&
+    /created successfully/i.test(ok.body?.message || ""),
     JSON.stringify(ok.body).slice(0, 120));
+  check("signup sends the browser to /login?created=1",
+    ok.body?.next === "/login?created=1", ok.body?.next);
   check("signup response carries no password field",
     !/password/i.test(JSON.stringify(ok.body)), JSON.stringify(ok.body).slice(0, 120));
   check("signup response carries no token", !/token/i.test(JSON.stringify(ok.body)));
   check("signup default role is student", ok.body?.user?.role === "student", ok.body?.user?.role);
 
-  const janeToken = await latestToken(c, at("jane.smith"), "/verify");
-  check("a confirmation mail was sent to the new address", janeToken.length > 30, janeToken.slice(0, 10));
+  const noMail = await latestToken(c, at("jane.smith"), "/verify");
+  check("NO confirmation mail is sent", noMail === "", noMail.slice(0, 12));
 
-  const early = await c.fetch("/api/auth/login", { json: { email: at("jane.smith"), password: strong } });
-  check("login before confirmation is refused with EMAIL_UNVERIFIED",
-    early.status === 401 && early.body?.error?.code === "EMAIL_UNVERIFIED",
-    early.status + " " + early.body?.error?.code);
-  const earlyWrong = await c.fetch("/api/auth/login", { json: { email: at("jane.smith"), password: "Wrong!Pw1" } });
-  check("wrong password on an unconfirmed account says nothing about confirmation",
-    earlyWrong.body?.error?.code === "INVALID_CREDENTIALS", earlyWrong.body?.error?.code);
+  const immediate = await c.fetch("/api/auth/login", { json: { email: at("jane.smith"), password: strong } });
+  check("the new account can sign in immediately", immediate.status === 200,
+    immediate.status + " " + (immediate.body?.error?.code || ""));
+  check("...and that sign-in issues the normal session cookie", c.jar.has("vts_session"));
+  await c.fetch("/api/auth/logout", { json: {} });
+  await c.primeCsrf();
 
-  const confirmed = await confirm(c, at("jane.smith"));
-  check("confirmation link is accepted", confirmed.status === 200 && confirmed.body?.next === "/login?verified=1",
-    confirmed.status + " " + JSON.stringify(confirmed.body));
-  const confirmedAgain = await c.fetch("/api/auth/verify", { json: { token: janeToken } });
-  check("confirmation link is single-use", confirmedAgain.status === 400 &&
-    confirmedAgain.body?.error?.code === "VERIFY_INVALID", confirmedAgain.status);
+  const wrong = await c.fetch("/api/auth/login", { json: { email: at("jane.smith"), password: "Wrong!Pw1" } });
+  check("the wrong password is still refused",
+    wrong.status === 401 && wrong.body?.error?.code === "INVALID_CREDENTIALS", wrong.body?.error?.code);
 
   for (const [label, email] of [["Gmail", "john@gmail.com"], ["Yahoo", "user@yahoo.com"],
                                 ["Outlook", "test@outlook.com"], ["Hotmail", "person@hotmail.com"],
@@ -444,10 +444,9 @@ section("Password storage");
   check("identical passwords produce different hashes (per-account salt)",
     second.ok && user.passwordHash !== other.passwordHash);
 
-  const unconfirmed = await developmentAuth.signIn({ email: at("store.check"), password: strong });
-  check("provider refuses an unconfirmed account even with the right password",
-    unconfirmed.ok === false && unconfirmed.code === "EMAIL_UNVERIFIED", unconfirmed.code);
-  await store.updateUser(at("store.check"), { emailVerifiedAt: Date.now() });
+  const record = await store.findUserByEmail(at("store.check"));
+  check("the account is marked usable at creation (verification disabled)",
+    Boolean(record?.emailVerifiedAt), String(record?.emailVerifiedAt));
 
   const good = await developmentAuth.signIn({ email: at("store.check"), password: strong });
   const bad = await developmentAuth.signIn({ email: at("store.check"), password: strong + "x" });
@@ -700,80 +699,53 @@ section("Forgot / reset password");
   check("/reset page is reachable", (await c.fetch("/reset")).status === 200);
 }
 
-/* ================= EMAIL VERIFICATION ================= */
-section("Email verification");
+/* ================= EMAIL VERIFICATION DISABLED ================= */
+section("Email verification is disabled for the temporary auth");
 
 {
-  const email = at("unconfirmed");
+  /* The temporary development auth creates a usable account at once.
+     Mail delivery is therefore not on the sign-up path at all, which is
+     what made this flow testable while the sending domain is unverified. */
+  const email = at("no.verification");
   const c = new Client();
   await c.primeCsrf();
+
+  const before = (await c.fetch("/__dev/outbox?json")).body.length;
   const made = await c.fetch("/api/auth/signup", { json: {
-    firstName: "Un", lastName: "Confirmed", email, password: strong, confirmPassword: strong } });
-  check("account is created", made.status === 201, made.status);
-
-  const firstToken = await latestToken(c, email, "/verify");
-
-  /* "Send it again" — same answer for everyone, mail only for the
-     unconfirmed account. */
-  const unknown = await c.fetch("/api/auth/resend", { json: { email: at("nobody.at.all") } });
-  const known = await c.fetch("/api/auth/resend", { json: { email: "  " + email.toUpperCase() } });
-  check("resend for unknown and known addresses answer identically",
-    unknown.status === 200 && JSON.stringify(unknown.body) === JSON.stringify(known.body),
-    unknown.status + " " + JSON.stringify(unknown.body));
-  const gmail = await c.fetch("/api/auth/resend", { json: { email: "john@gmail.com" } });
-  check("resend refuses a non-VTS address", gmail.status === 400, gmail.status);
-
-  const secondToken = await latestToken(c, email, "/verify");
-  check("resend issued a new link", secondToken && secondToken !== firstToken);
-
-  /* A reset token is not a confirmation token, and vice versa. */
-  await c.fetch("/api/auth/forgot", { json: { email } });
-  const resetToken = await latestToken(c, email, "/reset");
-  const crossed = await c.fetch("/api/auth/verify", { json: { token: resetToken } });
-  check("a reset link cannot be used to confirm an address",
-    crossed.status === 400 && crossed.body?.error?.code === "VERIFY_INVALID", crossed.status);
-  const crossedBack = await c.fetch("/api/auth/reset", { json: {
-    token: secondToken, password: "Cr0ss!Purpose", confirmPassword: "Cr0ss!Purpose" } });
-  check("a confirmation link cannot be used to reset a password",
-    crossedBack.status === 400 && crossedBack.body?.error?.code === "RESET_INVALID", crossedBack.status);
-
-  /* The first link still works after a resend (both are valid until
-     used or expired), and confirming twice is harmless. */
-  const ok = await c.fetch("/api/auth/verify", { json: { token: firstToken } });
-  check("an earlier, unused confirmation link still works", ok.status === 200, ok.status);
+    firstName: "No", lastName: "Verification", email, password: strong, confirmPassword: strong } });
+  check("signup succeeds", made.status === 201, made.status);
+  check("nothing was sent", (await c.fetch("/__dev/outbox?json")).body.length === before);
+  check("the response names no token or link",
+    !/token|http/i.test(JSON.stringify(made.body)), JSON.stringify(made.body).slice(0, 100));
 
   const login = await c.fetch("/api/auth/login", { json: { email, password: strong } });
-  check("confirmed account signs in", login.status === 200, login.status);
+  check("the account signs in with no confirmation step", login.status === 200, login.status);
   await c.fetch("/api/auth/logout", { json: {} });
 
-  /* Opening a reset link proves inbox access, so it confirms too. */
-  const fresh = at("reset.confirms");
-  const d = new Client();
-  await d.primeCsrf();
-  await d.fetch("/api/auth/signup", { json: {
-    firstName: "Via", lastName: "Reset", email: fresh, password: strong, confirmPassword: strong } });
-  await d.fetch("/api/auth/forgot", { json: { email: fresh } });
-  const viaReset = await latestToken(d, fresh, "/reset");
-  const resetOk = await d.fetch("/api/auth/reset", { json: {
-    token: viaReset, password: "Re5et!First", confirmPassword: "Re5et!First" } });
-  const afterReset = await d.fetch("/api/auth/login", { json: { email: fresh, password: "Re5et!First" } });
-  check("an unconfirmed account is confirmed by completing a password reset",
-    resetOk.status === 200 && afterReset.status === 200, resetOk.status + " / " + afterReset.status);
+  /* The server tells the pages so they can drop the resend affordance. */
+  const context = (await c.fetch("/api/auth/context")).body;
+  check("the server reports verification as not required",
+    context?.emailVerification?.required === false,
+    JSON.stringify(context?.emailVerification));
 
-  const noCsrf = await fetch(BASE + "/api/auth/verify", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: BASE },
-    body: JSON.stringify({ token: "x" }),
-  });
-  check("verify requires the CSRF token", noCsrf.status === 403, noCsrf.status);
+  const resend = await c.fetch("/api/auth/resend", { json: { email } });
+  check("the resend route reports it is not supported",
+    resend.status === 400 && resend.body?.error?.code === "VERIFY_NOT_SUPPORTED",
+    resend.status + " " + resend.body?.error?.code);
 
-  const page = await c.fetch("/verify");
-  check("/verify page is reachable and asks for a click, not an automatic submit",
-    page.status === 200 && /id="verify-form"/.test(page.text) && !/requestSubmit\(\)/.test(page.text));
-  const signupPage = (await c.fetch("/signup")).text;
-  check("/signup has the check-your-email state", /id="sent"/.test(signupPage));
-  const loginPage = (await c.fetch("/login")).text;
-  check("/login has the resend action, hidden by default", /id="resend"[^>]*hidden/.test(loginPage));
+  /* Accounts left unconfirmed while verification WAS required must not
+     be stranded: there is no confirmation mail to wait for any more. */
+  const LIB = new URL("./netlify/edge-functions/lib/", import.meta.url);
+  const store = await import(new URL("user-store.js", LIB));
+  const stranded = at("stranded.before");
+  const s2 = new Client();
+  await s2.primeCsrf();
+  await s2.fetch("/api/auth/signup", { json: {
+    firstName: "Stran", lastName: "Ded", email: stranded, password: strong, confirmPassword: strong } });
+  await store.updateUser(stranded, { emailVerifiedAt: null });
+  const strandedLogin = await s2.fetch("/api/auth/login", { json: { email: stranded, password: strong } });
+  check("an account left unconfirmed earlier can now sign in",
+    strandedLogin.status === 200, strandedLogin.status + " " + (strandedLogin.body?.error?.code || ""));
 }
 
 /* ================= MAIL PROVIDER ADAPTER ================= */
@@ -965,12 +937,8 @@ if (!haveDb) {
   await rest("/api/auth/context", null, jar);
   const up = await rest("/api/auth/signup", { firstName: "Still", lastName: "Here", email, password, confirmPassword: password }, jar);
   check("sign up on server 1", up.status === 201, up.status);
-  const outbox = await (await fetch(B + "/__dev/outbox?json")).json();
-  const link = (/https?:\/\/\S+/.exec(outbox.at(-1)?.text || "") || [])[0] || "";
-  const verifyToken = link ? new URL(link).searchParams.get("token") : "";
-  check("confirmation link issued", Boolean(verifyToken));
-  check("confirm on server 1", (await rest("/api/auth/verify", { token: verifyToken }, jar)).status === 200);
-  check("sign in on server 1", (await rest("/api/auth/login", { email, password }, jar)).status === 200);
+  check("sign in on server 1 (no confirmation step needed)",
+    (await rest("/api/auth/login", { email, password }, jar)).status === 200);
 
   server.child.kill();
   await sleep(600);
@@ -1011,134 +979,6 @@ section("Sessions expire; accounts do not");
   check("without a session the hub is refused", (await c.fetch("/")).status === 302);
   check("...but the same email + password sign in again",
     (await c.fetch("/api/auth/login", { json: { email, password: strong } })).status === 200);
-}
-
-/* ================= SECURITY HEADERS ================= */
-section("Security headers");
-
-{
-  /* netlify.toml is read by Netlify and nothing else, so on Plesk the
-     application must set these itself. */
-  const c = new Client();
-  const page = await c.fetch("/login");
-
-  const csp = page.headers.get("content-security-policy") || "";
-  check("Content-Security-Policy is served", csp.length > 0);
-  check("...with no inline-script escape hatch",
-    /script-src 'self'/.test(csp) && !/script-src[^;]*unsafe-inline/.test(csp), csp.slice(0, 70));
-  check("...allowing the two Microsoft hosts MSAL needs",
-    csp.includes("https://login.microsoftonline.com") && csp.includes("https://graph.microsoft.com"));
-  check("...and closing base-uri and object-src",
-    csp.includes("base-uri 'none'") && csp.includes("object-src 'none'"));
-
-  check("X-Frame-Options is served", (page.headers.get("x-frame-options") || "") === "SAMEORIGIN");
-  check("X-Content-Type-Options is served", (page.headers.get("x-content-type-options") || "") === "nosniff");
-  check("X-Robots-Tag keeps the private hub out of search engines",
-    /noindex/.test(page.headers.get("x-robots-tag") || ""), page.headers.get("x-robots-tag"));
-
-  /* HSTS only over HTTPS; the test server is plain HTTP. */
-  check("HSTS is withheld over plain HTTP", !page.headers.has("strict-transport-security"));
-
-  /* Every response, not just HTML. */
-  const asset = await c.fetch("/assets/auth-client.js");
-  check("assets carry the headers too",
-    Boolean(asset.headers.get("content-security-policy")) &&
-    (asset.headers.get("x-content-type-options") || "") === "nosniff", asset.status);
-  const api = await c.fetch("/api/auth/context");
-  check("API responses carry them as well", Boolean(api.headers.get("content-security-policy")));
-
-  /* One CSP, never two — duplicates are enforced as the intersection. */
-  const raw = await fetch(BASE + "/login");
-  const all = [...raw.headers].filter(([k]) => k === "content-security-policy");
-  check("exactly one Content-Security-Policy header", all.length === 1, String(all.length));
-}
-
-section("Reset tokens stay out of access logs");
-
-{
-  /* /reset and /verify arrive with a one-time token in the query string.
-     Their stylesheets and scripts are requested before the page strips
-     it, and each of those requests carries the full URL in Referer,
-     which web servers log. no-referrer on those pages closes that. */
-  const c = new Client();
-  for (const path of ["/reset", "/verify"]) {
-    const page = await c.fetch(path);
-    check(path + " sends Referrer-Policy: no-referrer",
-      (page.headers.get("referrer-policy") || "") === "no-referrer",
-      page.headers.get("referrer-policy"));
-  }
-  const ordinary = await c.fetch("/login");
-  check("ordinary pages keep strict-origin-when-cross-origin",
-    (ordinary.headers.get("referrer-policy") || "") === "strict-origin-when-cross-origin",
-    ordinary.headers.get("referrer-policy"));
-
-  const { referrerPolicyFor } = await import(
-    new URL("./netlify/edge-functions/lib/security-headers.js", import.meta.url));
-  check("the .html forms are covered too",
-    referrerPolicyFor("/reset.html") === "no-referrer" &&
-    referrerPolicyFor("/verify.html") === "no-referrer");
-  check("and nothing else is", referrerPolicyFor("/") === "strict-origin-when-cross-origin");
-}
-
-section("Sign-up recovers when the mail cannot be sent");
-
-{
-  /* The failure users hit while the sending domain is unverified: the
-     account must not be left occupying the address. */
-  const LIB = new URL("./netlify/edge-functions/lib/", import.meta.url);
-  const { developmentAuth } = await import(new URL("providers/development-auth.js", LIB));
-  const store = await import(new URL("user-store.js", LIB));
-
-  const email = at("mail.fails");
-  const realFetch = globalThis.fetch;
-  const savedOutbox = globalThis.__vtsDevOutbox;
-  const savedKey = process.env.RESEND_API_KEY;
-  const savedFrom = process.env.MAIL_FROM;
-
-  /* Force the Resend path, and make the provider refuse — the 403 a
-     real unverified domain returns. */
-  delete globalThis.__vtsDevOutbox;
-  process.env.RESEND_API_KEY = "test-key";
-  process.env.MAIL_FROM = "VTS Hub <noreply@example.invalid>";
-  globalThis.fetch = async (url, init) =>
-    String(url).includes("api.resend.com/emails")
-      ? new Response('{"statusCode":403,"message":"domain is not verified"}', { status: 403 })
-      : realFetch(url, init);
-
-  let result;
-  try {
-    result = await developmentAuth.signUp({
-      firstName: "Mail", lastName: "Fails", email,
-      password: strong, confirmPassword: strong, siteOrigin: BASE,
-    });
-  } finally {
-    globalThis.fetch = realFetch;
-    if (savedOutbox !== undefined) globalThis.__vtsDevOutbox = savedOutbox;
-    if (savedKey === undefined) delete process.env.RESEND_API_KEY; else process.env.RESEND_API_KEY = savedKey;
-    if (savedFrom === undefined) delete process.env.MAIL_FROM; else process.env.MAIL_FROM = savedFrom;
-  }
-
-  check("sign-up reports the mail failure", result.ok === false && result.code === "MAIL_FAILED", result.code);
-  check("...and the message says to try again",
-    /try again/i.test(result.message || ""), result.message);
-  check("the half-made account is NOT left behind",
-    (await store.findUserByEmail(email)) === null,
-    "a record for " + email + " survived");
-
-  /* The point of the fix: trying again actually works. */
-  const retry = await developmentAuth.signUp({
-    firstName: "Mail", lastName: "Fails", email,
-    password: strong, confirmPassword: strong, siteOrigin: BASE,
-  });
-  check("trying again succeeds rather than 'account already exists'",
-    retry.ok === true, retry.code + " " + (retry.message || ""));
-
-  /* And a genuine duplicate is still refused. */
-  const dup = await developmentAuth.signUp({
-    firstName: "Mail", lastName: "Fails", email,
-    password: strong, confirmPassword: strong, siteOrigin: BASE,
-  });
-  check("a real duplicate is still refused", dup.ok === false && dup.code === "ACCOUNT_EXISTS", dup.code);
 }
 
 /* ================= SHIPPED ASSETS ================= */

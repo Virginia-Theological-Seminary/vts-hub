@@ -57,6 +57,7 @@
     NAME_REQUIRED: "Please enter your first and last name.",
     RESET_DONE: "Your password has been updated. Please sign in with your new password.",
     VERIFY_DONE: "Your email address is confirmed. Please sign in.",
+    ACCOUNT_CREATED: "Your VTS Hub account has been created successfully. Please sign in.",
   };
 
   function showAlert(message, kind) {
@@ -498,9 +499,11 @@
     if (mode === "login") {
       try {
         var arrived = new URLSearchParams(window.location.search);
+        if (arrived.has("created")) showAlert(MESSAGES.ACCOUNT_CREATED, "success");
         if (arrived.has("reset")) showAlert(MESSAGES.RESET_DONE, "success");
         if (arrived.has("verified")) showAlert(MESSAGES.VERIFY_DONE, "success");
-        if (arrived.has("reset") || arrived.has("verified")) {
+        if (arrived.has("created") || arrived.has("reset") || arrived.has("verified")) {
+          /* Said once: a reload should not repeat it. */
           window.history.replaceState(null, "", window.location.pathname);
         }
       } catch (err) {

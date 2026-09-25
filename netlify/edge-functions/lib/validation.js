@@ -36,6 +36,10 @@ export const MESSAGES = {
   RESET_INVALID:
     "This password reset link is invalid or has expired. Please request a new one.",
   RESET_DONE: "Your password has been updated. Please sign in with your new password.",
+  /* Shown on the sign-in page after a successful sign-up, while email
+     verification is disabled for the temporary development auth. */
+  ACCOUNT_CREATED:
+    "Your VTS Hub account has been created successfully. Please sign in.",
   VERIFY_SENT:
     "Check your email. We've sent a link to confirm your address; it expires in 24 hours.",
   VERIFY_RESENT:

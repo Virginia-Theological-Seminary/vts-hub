@@ -150,9 +150,11 @@ async function handleSignup(request, context) {
     });
   }
 
-  /* No session yet. The account cannot be used until the address is
-     confirmed, and confirming it sends the holder to the sign-in page
-     — which is also where the new password gets proven. */
+  /* No session is issued by signing up. The password is proven on the
+     sign-in page, which is the only place a session is ever minted —
+     there is no second session path. `next` is where the provider wants
+     the browser sent: /login?created=1 when the account is usable at
+     once, absent when a confirmation link has to be opened first. */
   return json(
     {
       ok: true,
@@ -160,6 +162,7 @@ async function handleSignup(request, context) {
       verification: result.verification,
       message: result.message,
       delivery: result.delivery,
+      next: result.next ? safeNextPath(result.next, "/login") : undefined,
     },
     { status: 201 }
   );

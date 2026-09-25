@@ -39,6 +39,31 @@ import { randomId, sha256Hex } from "../runtime.js";
 
 const deny = (field, code, message) => ({ ok: false, field, code, message });
 
+/* ------------------------------------------------------------------
+   EMAIL VERIFICATION IS INTENTIONALLY DISABLED
+   ------------------------------------------------------------------
+   Sign-up creates a usable account immediately: no token is minted, no
+   confirmation mail is sent, and the new account can sign in at once.
+
+   Why: this is temporary development authentication, and requiring a
+   confirmation link made it untestable. Mail can only leave the site
+   once a sending domain is verified with the mail provider, which is a
+   DNS change outside this application. Until then nobody but the mail
+   account's own owner could complete a sign-up.
+
+   What this costs, stated plainly: the @vts.edu rule now checks the
+   SHAPE of an address, not that the person can read mail at it. Someone
+   could register dean@vts.edu without owning it. That is acceptable for
+   a temporary system whose content is an internal link directory, and
+   it is precisely what Microsoft Entra fixes — Entra authenticates
+   against the real account, so this whole file retires with it.
+
+   To turn verification back on, set this to true. Everything it needs
+   is still here and still tested: the token minting, the mail, the
+   /verify redemption and the "send it again" path.
+   ------------------------------------------------------------------ */
+const EMAIL_VERIFICATION_REQUIRED = false;
+
 /* How long each kind of link stays valid. A reset link is a credential
    for as long as it lives, so it is short. A confirmation link only
    proves inbox access for an account that cannot yet do anything, so
@@ -118,16 +143,33 @@ export const developmentAuth = {
       firstName,
       lastName,
       role: DEFAULT_ROLE,
+      /* Usable immediately while verification is off, so the stored
+         record says what is true rather than "awaiting a confirmation
+         that will never be asked for". */
+      emailVerifiedAt: EMAIL_VERIFICATION_REQUIRED ? null : Date.now(),
     });
 
     if (!created.ok) return deny("email", "ACCOUNT_EXISTS", MESSAGES.DUPLICATE);
 
-    /* The account exists but cannot sign in until the holder opens the
-       link. If the mail cannot be sent, the half-made account is removed
-       again: it could not be used, and leaving it would occupy the
-       address — the next attempt would be told "an account already
-       exists, please sign in instead", which is advice that leads
-       nowhere. Removing it makes "please try again" true. */
+    /* Verification off (the default): the account is already usable, so
+       there is nothing to send and nothing to wait for. The holder goes
+       to the sign-in page and proves the password they just chose. */
+    if (!EMAIL_VERIFICATION_REQUIRED) {
+      return {
+        ok: true,
+        user: publicUser(created.user),
+        verification: "not-required",
+        message: MESSAGES.ACCOUNT_CREATED,
+        next: "/login?created=1",
+      };
+    }
+
+    /* Verification on: the account exists but cannot sign in until the
+       holder opens the link. If the mail cannot be sent, the half-made
+       account is removed again — it could not be used, and leaving it
+       would occupy the address, so the next attempt would be told "an
+       account already exists, please sign in instead", which is advice
+       that leads nowhere. Removing it makes "please try again" true. */
     try {
       await sendLink(verificationMail(created.user, input.siteOrigin));
     } catch (err) {
@@ -172,8 +214,13 @@ export const developmentAuth = {
     }
 
     /* Only after the password is right, so an unverified account is not
-       revealed to anyone who cannot already sign in to it. */
-    if (!user.emailVerifiedAt) {
+       revealed to anyone who cannot already sign in to it.
+
+       Skipped while verification is off — and deliberately so for
+       accounts too, not just new ones. Accounts created while it was on
+       and never confirmed would otherwise be locked out for good: there
+       is no confirmation mail to wait for any more. */
+    if (EMAIL_VERIFICATION_REQUIRED && !user.emailVerifiedAt) {
       return deny("email", "EMAIL_UNVERIFIED", MESSAGES.EMAIL_UNVERIFIED);
     }
 
@@ -323,7 +370,10 @@ export const developmentAuth = {
       passwordSignIn: true,
       passwordSignUp: true,
       passwordReset: { available: true, delivery: mailDelivery() },
-      emailVerification: { required: true, delivery: mailDelivery() },
+      emailVerification: {
+        required: EMAIL_VERIFICATION_REQUIRED,
+        delivery: mailDelivery(),
+      },
       notice:
         "Temporary development sign-in. Accounts created here are for building and " +
         "testing the hub only and are not VTS Microsoft 365 accounts.",

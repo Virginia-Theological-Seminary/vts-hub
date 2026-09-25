@@ -212,7 +212,18 @@ export async function findUserByEmail(email) {
 /* Creates the record. The caller has already validated the email and
    hashed the password; this function never sees a plaintext password
    and stores only `passwordHash`. */
-export async function createUser({ email, passwordHash, firstName, lastName, role }) {
+export async function createUser({
+  email,
+  passwordHash,
+  firstName,
+  lastName,
+  role,
+  /* When the address counts as confirmed. Optional and defaulting to
+     null, so every existing caller behaves exactly as before; the
+     provider passes a timestamp when email verification is switched
+     off and the account is usable from the moment it is created. */
+  emailVerifiedAt = null,
+}) {
   const store = await backend();
   const key = await keyFor(email);
 
@@ -223,9 +234,10 @@ export async function createUser({ email, passwordHash, firstName, lastName, rol
     firstName,
     lastName,
     role,
-    /* Set when the holder proves they can read mail at this address.
-       Until then the account exists but cannot sign in. */
-    emailVerifiedAt: null,
+    /* Set when the holder proves they can read mail at this address —
+       or at creation, when verification is not required. Null means the
+       account exists but cannot sign in. */
+    emailVerifiedAt,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
