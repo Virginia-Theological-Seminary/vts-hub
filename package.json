@@ -8,9 +8,11 @@
   },
   "scripts": {
     "start": "node dev-server.mjs",
-    "test": "node auth-tests.mjs"
+    "test": "node auth-tests.mjs",
+    "db": "node database-migrate/migrate.mjs"
   },
   "dependencies": {
-    "@netlify/blobs": "^11.1.0"
+    "@netlify/blobs": "^11.1.0",
+    "mysql2": "^3.24.4"
   }
 }
