@@ -1329,6 +1329,173 @@ section("Sign-up by email confirmation");
   else delete process.env.VTS_SIGNUP_POLICY;
 }
 
+/* ================= ADMINISTRATION PAGE ================= */
+section("Administration page");
+
+adminSection: {
+  /* The page exists so the one person administering the hub can invite
+     people without a shell on the production server. Everything below
+     is about the thing that makes that safe: the server deciding, on
+     every request, from the session IT signed — never from the page,
+     a header, or a field in the body. */
+  /* Fixed, not run-suffixed: the SERVER has to have been told this
+     address in VTS_ADMIN_EMAILS before it started, so it cannot depend
+     on anything this process generates. .env carries it locally. */
+  const admin = "hub.admin@vts.edu";
+
+  /* Make the account if this is the first run against this database;
+     sign in to it if an earlier run already did. */
+  const setup = new Client();
+  await setup.primeCsrf();
+  await setup.fetch("/api/auth/signup", { json: {
+    firstName: "Hub", lastName: "Admin", email: admin,
+    password: strong, confirmPassword: strong } });
+
+  /* ---- nobody ---- */
+  const anon = new Client();
+  await anon.primeCsrf();
+
+  const anonContext = await anon.fetch("/api/admin/context");
+  check("signed out, the admin API refuses with 401",
+    anonContext.status === 401 && anonContext.body?.error?.code === "NOT_SIGNED_IN",
+    anonContext.status + " " + anonContext.body?.error?.code);
+
+  const anonAccounts = await anon.fetch("/api/admin/accounts");
+  check("...and will not list accounts", anonAccounts.status === 401, anonAccounts.status);
+
+  const anonInvite = await anon.fetch("/api/admin/invite", { json: { email: at("anon.invite") } });
+  check("...and will not issue an invitation", anonInvite.status === 401, anonInvite.status);
+
+  const anonPage = await anon.fetch("/admin");
+  check("the page itself sends a signed-out visitor to sign in",
+    anonPage.status === 302 && (anonPage.headers.get("location") || "").includes("/login"),
+    anonPage.status + " " + anonPage.headers.get("location"));
+
+  /* ---- an ordinary account ---- */
+  const ordinary = at("ordinary.person");
+  const plain = new Client();
+  await plain.primeCsrf();
+  await plain.fetch("/api/auth/signup", { json: {
+    firstName: "Ord", lastName: "Inary", email: ordinary,
+    password: strong, confirmPassword: strong } });
+  const signedIn = await plain.fetch("/api/auth/login", { json: { email: ordinary, password: strong } });
+  check("an ordinary account can sign in", signedIn.status === 200, signedIn.status);
+
+  const plainContext = await plain.fetch("/api/admin/context");
+  check("signed in but not an administrator is 403, not 401",
+    plainContext.status === 403 && plainContext.body?.error?.code === "NOT_ADMIN",
+    plainContext.status + " " + plainContext.body?.error?.code);
+  check("...and the refusal does not name who IS an administrator",
+    !JSON.stringify(plainContext.body).toLowerCase().includes(admin.toLowerCase()),
+    JSON.stringify(plainContext.body));
+
+  const plainInvite = await plain.fetch("/api/admin/invite", { json: { email: at("sneaky.invite") } });
+  check("an ordinary account cannot issue an invitation", plainInvite.status === 403, plainInvite.status);
+
+  const plainAccounts = await plain.fetch("/api/admin/accounts");
+  check("...nor read the account list", plainAccounts.status === 403, plainAccounts.status);
+
+  /* The role in the body is read nowhere, as at sign-up. */
+  const claiming = await plain.fetch("/api/admin/invite", {
+    json: { email: at("claimed.admin"), role: "admin", admin: true } });
+  check("claiming to be an admin in the request body changes nothing",
+    claiming.status === 403, claiming.status);
+
+  /* ---- the administrator ---- */
+  const boss = new Client();
+  await boss.primeCsrf();
+  const bossIn = await boss.fetch("/api/auth/login", { json: { email: admin, password: strong } });
+  check("the configured administrator can sign in", bossIn.status === 200,
+    bossIn.status + " " + (bossIn.body?.error?.code || ""));
+
+  const bossContext = await boss.fetch("/api/admin/context");
+  if (bossContext.status === 403) {
+    check("VTS_ADMIN_EMAILS names " + admin + " on the running server", false,
+      "set VTS_ADMIN_EMAILS=" + admin + " (it is in .env.example) and restart the server");
+    break adminSection;
+  }
+  check("the administrator is recognised",
+    bossContext.status === 200 && bossContext.body?.admin === true,
+    bossContext.status + " " + JSON.stringify(bossContext.body?.admin));
+
+  const invited = at("invited.by.page");
+  const issued = await boss.fetch("/api/admin/invite", { json: { email: invited } });
+  check("the administrator can issue an invitation",
+    issued.status === 200 && /^VTSI(-[A-Z0-9]{4}){2}$/.test(issued.body?.code || ""),
+    issued.status + " " + issued.body?.code);
+
+  /* The point of the whole page: the code it prints actually works. */
+  const newcomer = new Client();
+  await newcomer.primeCsrf();
+  const used = await newcomer.fetch("/api/auth/signup", { json: {
+    firstName: "New", lastName: "Comer", email: invited,
+    password: strong, confirmPassword: strong, inviteCode: issued.body.code } });
+  check("a code issued from the page creates an account", used.status === 201,
+    used.status + " " + (used.body?.error?.code || ""));
+
+  const twice = await boss.fetch("/api/admin/invite", { json: { email: invited } });
+  check("inviting somebody who already has an account is refused",
+    twice.status === 400 && twice.body?.error?.code === "ACCOUNT_EXISTS",
+    twice.status + " " + twice.body?.error?.code);
+
+  const notVts = await boss.fetch("/api/admin/invite", { json: { email: "someone@gmail.com" } });
+  check("a non-VTS address is refused here too",
+    notVts.status === 400 && notVts.body?.error?.code === "EMAIL_NOT_ALLOWED",
+    notVts.body?.error?.code);
+
+  /* Recovery codes, the other reason to open this page. */
+  const replacement = await boss.fetch("/api/admin/code", { json: { email: invited } });
+  check("the administrator can issue a replacement recovery code",
+    replacement.status === 200 && /^VTSH(-[A-Z0-9]{4}){4}$/.test(replacement.body?.code || ""),
+    replacement.status + " " + replacement.body?.code);
+
+  const reset = await newcomer.fetch("/api/auth/reset", { json: {
+    email: invited, recoveryCode: replacement.body.code,
+    password: "Rec0very!Pass", confirmPassword: "Rec0very!Pass" } });
+  check("...and it actually resets the password", reset.status === 200,
+    reset.status + " " + (reset.body?.error?.code || ""));
+
+  /* ---- what must never come back ---- */
+  const list = await boss.fetch("/api/admin/accounts");
+  check("the administrator can read the account list",
+    list.status === 200 && Array.isArray(list.body?.accounts), list.status);
+  const asText = JSON.stringify(list.body);
+  check("the list contains no password hash", !/pbkdf2-sha256\$/.test(asText));
+  check("...no passwordHash field at all", !asText.includes("passwordHash"));
+  check("...and no recovery-code hash", !asText.includes("recoveryCodeHash"));
+  check("it does say who cannot sign in",
+    list.body.accounts.every((a) => "blocked" in a));
+
+  /* ---- CSRF ---- */
+  /* Raw fetch, because Client always attaches the header and forces the
+     origin — the same reason the CSRF section above uses it. */
+  const noToken = await fetch(BASE + "/api/admin/invite", {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: boss.cookieHeader(), origin: BASE },
+    body: JSON.stringify({ email: at("no.csrf") }),
+  });
+  check("a write without the CSRF header is refused", noToken.status === 403, noToken.status);
+
+  const crossSite = await fetch(BASE + "/api/admin/invite", {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: boss.cookieHeader(),
+               origin: "https://evil.example", "x-vts-csrf": boss.jar.get("vts_csrf") },
+    body: JSON.stringify({ email: at("cross.site") }),
+  });
+  check("a write from another origin is refused", crossSite.status === 403, crossSite.status);
+
+  /* ---- method and shape ---- */
+  const wrongMethod = await boss.fetch("/api/admin/invite");
+  check("GET on a write route is 405", wrongMethod.status === 405, wrongMethod.status);
+  const nonsense = await boss.fetch("/api/admin/nonsense");
+  check("an unknown admin route is 404", nonsense.status === 404, nonsense.status);
+
+  /* ---- after signing out ---- */
+  await boss.fetch("/api/auth/logout", { json: {} });
+  const afterOut = await boss.fetch("/api/admin/context");
+  check("signing out ends administration too", afterOut.status === 401, afterOut.status);
+}
+
 /* ================= SHIPPED ASSETS ================= */
 section("Shipped assets");
 

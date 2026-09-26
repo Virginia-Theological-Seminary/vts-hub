@@ -49,4 +49,4 @@ export default async (request, context) => {
   return response;
 };
 
-export const config = { path: ["/", "/index.html"] };
+export const config = { path: ["/", "/index.html", "/admin", "/admin.html"] };

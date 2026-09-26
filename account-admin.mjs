@@ -176,6 +176,9 @@ async function main() {
 
   const store = await load("netlify/edge-functions/lib/user-store.js");
   const { normalizeEmail, isVtsEmail } = await load("netlify/edge-functions/lib/validation.js");
+  /* The same implementations the administration page calls, so the two
+     cannot drift apart — see lib/admin-actions.js. */
+  const actions = await load("netlify/edge-functions/lib/admin-actions.js");
 
   let kind;
   try {
@@ -219,46 +222,16 @@ async function main() {
   }
 
   if (opts.invite) {
-    if (await store.findUserByEmail(target)) {
-      console.error(
-        "\n  " + target + " already has an account. Use --code to issue them a" +
-          "\n  recovery code instead.\n"
-      );
+    const result = await actions.issueInvitation(target);
+    if (!result.ok) {
+      console.error("\n  " + result.message + "\n");
       process.exitCode = 1;
       return;
     }
-
-    /* A code issued while sign-up is not asking for one would do
-       nothing at all, and the administrator would have no way to tell.
-       Resolved the same way the server resolves it, so the two agree. */
-    const { signupPolicy } = await load(
-      "netlify/edge-functions/lib/providers/development-auth.js"
-    );
-    const policy = await signupPolicy();
-    if (!policy.invitation) {
-      console.error(
-        "\n  Sign-up is not asking for invitations at the moment, so a code" +
-          "\n  issued now would do nothing. " + target + " can sign up at /signup" +
-          "\n  and confirm the address from the link sent to it." +
-          "\n\n  (" + policy.source + ": " + policy.reason + ")\n"
-      );
-      process.exitCode = 1;
-      return;
-    }
-
-    const { generateInviteCode, hashInviteCode } = await load(
-      "netlify/edge-functions/lib/invite.js"
-    );
-    const invite = generateInviteCode();
-    await store.putInvite(target, {
-      codeHash: await hashInviteCode(invite),
-      issuedAt: new Date().toISOString(),
-    });
-
     console.log(`
-  Invitation for ${target}
+  Invitation for ${result.email}
 
-      ${invite}
+      ${result.code}
 
   Give this to them, having confirmed who they are. It works only for
   that address and only once. Any earlier invitation for them has been
@@ -267,45 +240,48 @@ async function main() {
     return;
   }
 
-  const user = await store.findUserByEmail(target);
-  if (!user) {
-    console.error("\n  No account for " + target + "\n");
-    process.exitCode = 1;
-    return;
-  }
-
   if (opts.verify) {
-    if (user.emailVerifiedAt && !user.verificationPending) {
-      console.log("\n  " + target + " is already confirmed. Nothing to do.\n");
+    const result = await actions.confirmAddress(target);
+    if (!result.ok) {
+      console.error("\n  " + result.message + "\n");
+      process.exitCode = 1;
       return;
     }
-    await store.updateUser(target, {
-      emailVerifiedAt: Date.now(),
-      verificationPending: false,
-    });
+    if (result.alreadyConfirmed) {
+      console.log("\n  " + result.email + " is already confirmed. Nothing to do.\n");
+      return;
+    }
     console.log(
-      "\n  Confirmed " + target + " by hand. They can sign in with the password" +
-        "\n  they chose at sign-up.\n"
+      "\n  Confirmed " + result.email + " by hand. They can sign in with the" +
+        "\n  password they chose at sign-up.\n"
     );
     return;
   }
 
   if (opts.remove) {
+    /* Not in admin-actions.js on purpose: deletion is the one action
+       with no undo, and it stays where it needs access to the server
+       rather than a browser tab and a stolen session. */
+    if (!(await store.findUserByEmail(target))) {
+      console.error("\n  No account for " + target + "\n");
+      process.exitCode = 1;
+      return;
+    }
     await store.deleteUser(target);
     console.log("\n  Removed " + target + ". They can sign up again with the same address.\n");
     return;
   }
 
-  const { generateRecoveryCode, hashRecoveryCode } = await load(
-    "netlify/edge-functions/lib/recovery-code.js"
-  );
-  const code = generateRecoveryCode();
-  await store.updateUser(target, { recoveryCodeHash: await hashRecoveryCode(code) });
-
+  const result = await actions.issueRecoveryCode(target);
+  if (!result.ok) {
+    console.error("\n  " + result.message + "\n");
+    process.exitCode = 1;
+    return;
+  }
   console.log(`
-  New recovery code for ${target}
+  New recovery code for ${result.email}
 
-      ${code}
+      ${result.code}
 
   Their previous code no longer works. Give this to them, having
   confirmed who they are, and ask them to go to /reset and set a new

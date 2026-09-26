@@ -305,7 +305,40 @@ Nothing in it can be used to sign in. It is dropped when Entra takes over.
 
 ### Administering accounts
 
-`npm run account` is a command-line tool for whoever has access to the server.
+There are two ways in, doing the same things through the same code
+(`lib/admin-actions.js`), so they cannot drift apart.
+
+#### The page at `/admin`
+
+For the person who administers the hub but does not have a shell on the
+production server — which is the normal case, and the reason this exists.
+Sign in as yourself, type an address, and get a code on screen: an invitation
+for somebody new, or a replacement recovery code for somebody locked out. It
+also lists every account and says plainly who cannot sign in.
+
+Who may use it is `VTS_ADMIN_EMAILS`, a comma-separated list set in the server
+environment. **An environment variable rather than a stored role, deliberately.**
+Somebody has to be the first administrator, and every other way of arranging
+that is worse: a stored role can only be set by editing the database or running
+a command on the server, which is precisely the access this page exists to
+avoid needing. Because it lives outside the application, an attacker who took
+over an account — or the whole database — still cannot make themselves an
+administrator. Unset means nobody can administer the site, which is the right
+default for a site nobody has configured.
+
+The list is checked on every request against the address in the session **the
+server itself signed**, never against anything the page sends. A signed-out
+visitor is sent to sign in; somebody signed in who is not on the list gets a
+plain refusal that does not name who is. The page hiding its own form is a
+courtesy, not a control.
+
+Deleting an account is **not** on the page. It is the one action with no undo,
+so it stays where it needs access to the server rather than a browser tab and a
+borrowed session.
+
+#### `npm run account`
+
+A command-line tool for whoever has access to the server.
 It is not published and not served — only `site/` is — and it refuses to run
 against the in-memory store, where it would be editing a copy that disappears.
 

@@ -89,6 +89,11 @@
   to = "/verify.html"
   status = 200
 
+[[redirects]]
+  from = "/admin"
+  to = "/admin.html"
+  status = 200
+
 # Single-page behaviour: the MSAL redirect returns to "/" with a hash,
 # which is served by index.html anyway. No rewrite needed for /files/
 # or /api/ — the edge functions claim those paths themselves.

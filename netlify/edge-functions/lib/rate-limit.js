@@ -79,6 +79,10 @@ export const LIMITS = {
   LOGIN_PER_IP: { limit: 200, windowMs: 15 * 60 * 1000 },
   /* Account creation, per client address — same reasoning. */
   SIGNUP_PER_IP: { limit: 30, windowMs: 60 * 60 * 1000 },
+  /* Administration actions, per administrator. Not really about
+     attackers — the caller is signed in and named — but a stuck
+     script should hit a ceiling somewhere rather than nowhere. */
+  ADMIN_ACTIONS: { limit: 60, windowMs: 15 * 60 * 1000 },
   /* Reset requests, per address asked about. Each one sends a message,
      so this is also what stops the form being used to flood an inbox. */
   FORGOT_PER_EMAIL: { limit: 3, windowMs: 15 * 60 * 1000 },
