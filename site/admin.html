@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Administration — VTS Hub</title>
+<link rel="icon" href="assets/favicon.ico">
+<link rel="stylesheet" href="assets/styles.css">
+<link rel="stylesheet" href="assets/auth.css">
+</head>
+<body class="gate">
+
+<div class="gate-card auth-card admin-card">
+  <img class="gate-logo" src="assets/logo-full.jpg"
+       alt="Virginia Theological Seminary" width="1210" height="1029">
+
+  <h1>Hub administration</h1>
+  <p class="gate-sub">
+    Temporary sign-in only. This page retires when Microsoft Entra takes over.
+  </p>
+
+  <!-- Signed in, but not an administrator. -->
+  <div id="denied" hidden>
+    <p class="auth-alert" role="alert" id="denied-message"></p>
+    <a class="btn-primary" href="/">Back to the hub</a>
+  </div>
+
+  <div id="panel" hidden>
+
+    <p class="auth-alert" id="form-alert" role="alert" hidden></p>
+
+    <!-- The one moment a code exists outside the server. -->
+    <div id="issued" hidden>
+      <h2 class="recovery-heading" id="issued-heading"></h2>
+      <p class="recovery-why" id="issued-why"></p>
+      <p class="recovery-code" id="issued-code" tabindex="0"></p>
+      <button class="btn-quiet recovery-copy" id="issued-copy" type="button">Copy code</button>
+      <p class="field-hint" id="issued-note"></p>
+      <button class="btn-quiet" id="issued-done" type="button">Done</button>
+    </div>
+
+    <form id="admin-form" novalidate>
+      <div class="field" id="field-email">
+        <label for="email">VTS email address</label>
+        <input id="email" name="email" type="email" inputmode="email"
+               autocomplete="off" spellcheck="false"
+               placeholder="someone@vts.edu" required>
+        <p class="field-hint">Must end in <strong>@vts.edu</strong>.</p>
+        <p class="field-error" id="error-email" hidden></p>
+      </div>
+
+      <div class="field">
+        <label for="action">What to do</label>
+        <select id="action" name="action">
+          <option value="invite">Invite them to create an account</option>
+          <option value="code">Issue a replacement recovery code</option>
+          <option value="confirm">Confirm their address by hand</option>
+        </select>
+        <p class="field-hint" id="action-hint"></p>
+      </div>
+
+      <button class="btn-primary" id="submit" type="submit">Go</button>
+    </form>
+
+    <h2 class="admin-heading">Accounts</h2>
+    <div class="field">
+      <label class="visually-hidden" for="filter">Filter by address</label>
+      <input id="filter" type="search" autocomplete="off" spellcheck="false"
+             placeholder="Filter by address…">
+    </div>
+    <p class="field-hint" id="accounts-summary">Loading…</p>
+    <table class="admin-table" id="accounts" hidden>
+      <thead>
+        <tr><th scope="col">Address</th><th scope="col">Role</th><th scope="col">Status</th></tr>
+      </thead>
+      <tbody id="accounts-body"></tbody>
+    </table>
+
+    <p class="admin-foot">
+      Signed in as <span id="who"></span> ·
+      <a href="/">Back to the hub</a>
+    </p>
+  </div>
+</div>
+
+<script src="assets/admin.js"></script>
+</body>
+</html>

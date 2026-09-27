@@ -26,6 +26,7 @@ export const MESSAGES = {
   NAME_REQUIRED: "Please enter your first and last name.",
   SERVER: "We couldn't complete your request right now. Please try again.",
   RATE_LIMIT: "Too many attempts. Please wait a few minutes and try again.",
+  SIGN_IN_REQUIRED: "Please sign in first.",
   SESSION_REQUIRED: "Please sign in to continue.",
   CSRF: "Your session expired while this page was open. Please reload and try again.",
   /* Said whether or not the address has an account, so the form cannot
