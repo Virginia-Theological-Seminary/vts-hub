@@ -298,6 +298,14 @@ section("Protected routes");
     hub.status === 302 && (hub.headers.get("location") || "").includes("/login?next="),
     hub.status + " " + hub.headers.get("location"));
 
+  /* Relative, so the browser resolves it against the address it used.
+     An absolute one would be built from the request the APPLICATION
+     sees, and behind Apache on Plesk that is plain http however the
+     visitor arrived — which sent https visitors back down to http. */
+  const where = hub.headers.get("location") || "";
+  check("...to a relative address, so https is never downgraded to http",
+    where.startsWith("/") && !/^https?:/i.test(where), where);
+
   const doc = await anon.fetch("/files/hr/");
   check("documents without auth are refused", doc.status === 401, doc.status);
 
