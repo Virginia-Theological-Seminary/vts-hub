@@ -212,6 +212,11 @@ export async function describeAuth(request) {
   const active = provider();
   const session = await readSession(request);
 
+  /* What sign-up asks for depends on whether mail can get out, which
+     is a question with an answer, not a constant. Settled here so the
+     page renders the form the server will actually accept. */
+  if (active.ready) await active.ready();
+
   return {
     ...active.describe(),
     configured: Boolean(sessionSecret()),

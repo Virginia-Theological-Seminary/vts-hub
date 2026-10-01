@@ -40,7 +40,21 @@ export default async (request, context) => {
          back through safeNextPath() in auth-api.js, so it can only ever
          name a path on this site. */
       const next = encodeURIComponent(url.pathname + url.search);
-      return Response.redirect(new URL("/login?next=" + next, url.origin), 302);
+
+      /* A RELATIVE Location, deliberately, rather than
+         Response.redirect(), which requires an absolute URL and would
+         build it from url.origin.
+
+         Behind Apache on Plesk, the application receives a plain http
+         request no matter how the browser arrived, so url.origin says
+         "http://hub.vts.edu" — and an https visitor was being redirected
+         back down to http. The browser resolves a relative Location
+         against the address IT used, which is the scheme that is
+         actually true, and no proxy header has to be trusted for it. */
+      return new Response(null, {
+        status: 302,
+        headers: { location: "/login?next=" + next },
+      });
     }
   }
 
@@ -49,4 +63,4 @@ export default async (request, context) => {
   return response;
 };
 
-export const config = { path: ["/", "/index.html"] };
+export const config = { path: ["/", "/index.html", "/admin", "/admin.html"] };

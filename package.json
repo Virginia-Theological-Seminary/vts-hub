@@ -1,7 +1,7 @@
 {
   "name": "vts-hub",
   "private": true,
-  "description": "VTS Hub — password-protected resource section for vts.edu",
+  "description": "VTS Hub \u2014 password-protected resource section for vts.edu",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node dev-server.mjs",
     "test": "node auth-tests.mjs",
-    "db": "node database-migrate/migrate.mjs"
+    "db": "node database-migrate/migrate.mjs",
+    "account": "node account-admin.mjs"
   },
   "dependencies": {
     "@netlify/blobs": "^11.1.0",

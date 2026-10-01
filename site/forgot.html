@@ -19,29 +19,19 @@
 
   <h1>Forgot your password?</h1>
   <p class="gate-sub">
-    Enter your <strong>@vts.edu</strong> address and we'll send you a link
-    to choose a new one.
+    You can set a new one using the <strong>recovery code</strong> you
+    saved when you created your account.
   </p>
 
-  <p class="auth-alert" id="form-alert" role="alert" hidden></p>
+  <a class="btn-primary" href="/reset">I have my recovery code</a>
 
-  <!-- Shown after a successful request in place of the form. -->
-  <div id="sent" hidden>
-    <p class="auth-alert is-success" id="sent-message" role="status"></p>
-    <p class="field-hint" id="sent-hint" hidden></p>
-  </div>
-
-  <form id="forgot-form" novalidate>
-    <div class="field" id="field-email">
-      <label for="email">VTS email address</label>
-      <input id="email" name="email" type="email" inputmode="email"
-             autocomplete="username" spellcheck="false"
-             placeholder="you@vts.edu" required>
-      <p class="field-error" id="error-email" hidden></p>
-    </div>
-
-    <button class="btn-primary" id="submit" type="submit">Send reset link</button>
-  </form>
+  <p class="auth-ms-help">
+    <strong>No recovery code?</strong> It cannot be re-sent &mdash; only
+    a hash of it is kept, so nobody can look it up, not even an
+    administrator. Contact the VTS development team: they can issue you
+    a new code, and you then set your own password with it. They never
+    see or choose your password.
+  </p>
 
   <p class="auth-alt">
     Remembered it? <a href="/login" id="login-link">Back to sign in</a>
