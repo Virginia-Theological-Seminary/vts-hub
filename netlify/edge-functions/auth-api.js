@@ -139,6 +139,7 @@ async function handleSignup(request, context) {
     confirmPassword: parsed.body.confirmPassword,
     firstName: parsed.body.firstName,
     lastName: parsed.body.lastName,
+    inviteCode: parsed.body.inviteCode,
     siteOrigin: siteOrigin(request),
   });
 
@@ -150,9 +151,11 @@ async function handleSignup(request, context) {
     });
   }
 
-  /* No session yet. The account cannot be used until the address is
-     confirmed, and confirming it sends the holder to the sign-in page
-     — which is also where the new password gets proven. */
+  /* No session is issued by signing up. The password is proven on the
+     sign-in page, which is the only place a session is ever minted —
+     there is no second session path. `next` is where the provider wants
+     the browser sent: /login?created=1 when the account is usable at
+     once, absent when a confirmation link has to be opened first. */
   return json(
     {
       ok: true,
@@ -160,6 +163,11 @@ async function handleSignup(request, context) {
       verification: result.verification,
       message: result.message,
       delivery: result.delivery,
+      next: result.next ? safeNextPath(result.next, "/login") : undefined,
+      /* The only response that ever carries this. The page shows it
+         once; the server cannot produce it again, because only its
+         hash was kept. */
+      recoveryCode: result.recoveryCode,
     },
     { status: 201 }
   );
@@ -183,6 +191,7 @@ async function handleResend(request, context) {
   if (!parsed.ok) return fail(400, "BAD_REQUEST", MESSAGES.SERVER);
 
   const active = provider();
+  if (active.ready) await active.ready();
   if (!active.resendVerification || active.describe().emailVerification?.required === false) {
     return fail(400, "VERIFY_NOT_SUPPORTED", MESSAGES.SERVER);
   }
@@ -366,13 +375,32 @@ async function handleReset(request, context) {
     return fail(400, "RESET_NOT_SUPPORTED", MESSAGES.RESET_INVALID);
   }
 
+  /* Per address as well as per client: the recovery code is the secret
+     being guessed here, so the limit has to follow the account, not
+     just the connection it is attacked from. */
+  const emailKey = "reset:" + normalizeEmail(parsed.body.email);
+  const emailGate = peek(emailKey, LIMITS.LOGIN_PER_EMAIL);
+  if (!emailGate.allowed) {
+    return fail(429, "RATE_LIMITED", MESSAGES.RATE_LIMIT, {
+      headers: { "retry-after": String(emailGate.retryAfterSeconds) },
+    });
+  }
+
   const result = await active.resetPassword({
+    /* A link token is still accepted by providers that issue one; the
+       development provider proves ownership with the recovery code
+       instead, since it has no email to send a link to. */
     token: parsed.body.token,
+    email: parsed.body.email,
+    recoveryCode: parsed.body.recoveryCode,
     password: parsed.body.password,
     confirmPassword: parsed.body.confirmPassword,
   });
 
   if (!result.ok) {
+    /* A wrong code counts against the address, the same way a wrong
+       password does. */
+    if (result.code === "RESET_INVALID") hit(emailKey, LIMITS.LOGIN_PER_EMAIL);
     return fail(400, result.code, result.message, {
       headers: { "x-vts-field": result.field || "" },
     });
@@ -381,12 +409,20 @@ async function handleReset(request, context) {
   /* A locked-out account is unlocked by a successful reset, otherwise
      the person who just proved ownership could not sign in. */
   clear("login:" + result.email);
+  clear(emailKey);
 
   /* Not signed in automatically: the new password is confirmed by
      using it, and no session is minted from a link that arrived by
      email. Any cookie this browser holds is cleared for good measure. */
   return json(
-    { ok: true, message: result.message, next: "/login?reset=1" },
+    {
+      ok: true,
+      message: result.message,
+      next: "/login?reset=1",
+      /* Single use: a fresh code replaces the one just spent, so the
+         holder is never left without a way back in. */
+      recoveryCode: result.recoveryCode,
+    },
     { cookies: clearSessionCookies(request, { keepCsrf: true }) }
   );
 }

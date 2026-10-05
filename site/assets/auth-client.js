@@ -128,6 +128,7 @@
           email: fields.email,
           password: fields.password,
           confirmPassword: fields.confirmPassword,
+          inviteCode: fields.inviteCode,
         },
       });
     },
@@ -154,14 +155,16 @@
       });
     },
 
-    /* Redeems a reset link with a new password. The token travels in
-       the body, never the query string of this request. */
+    /* Sets a new password. Ownership is proven by the recovery code
+       issued at sign-up, since there is no email to send a link to.
+       Both travel in the body, never the query string. */
     async resetPassword(fields) {
       await ensureCsrf();
       return call("/api/auth/reset", {
         method: "POST",
         body: {
-          token: fields.token,
+          email: fields.email,
+          recoveryCode: fields.recoveryCode,
           password: fields.password,
           confirmPassword: fields.confirmPassword,
         },

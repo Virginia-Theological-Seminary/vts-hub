@@ -26,6 +26,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { applySecurityHeaders } from "./netlify/edge-functions/lib/security-headers.js";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const siteDir = path.join(root, "site");
@@ -173,6 +174,7 @@ async function serveStatic(pathname) {
   if (pathname === "/forgot") pathname = "/forgot.html";
   if (pathname === "/reset") pathname = "/reset.html";
   if (pathname === "/verify") pathname = "/verify.html";
+  if (pathname === "/admin") pathname = "/admin.html";
   if (pathname === "/" || pathname.endsWith("/")) pathname += "index.html";
 
   const file = resolveInSite(pathname);
@@ -198,8 +200,9 @@ async function serveStatic(pathname) {
 
 const load = (rel) => import(pathToFileURL(path.join(root, rel)).href);
 
-const [authApi, protectApp, protectFiles, sessionApi] = [
+const [authApi, adminApi, protectApp, protectFiles, sessionApi] = [
   "netlify/edge-functions/auth-api.js",
+  "netlify/edge-functions/admin-api.js",
   "netlify/edge-functions/protect-app.js",
   "netlify/edge-functions/protect-files.js",
   "netlify/edge-functions/session.js",
@@ -215,13 +218,20 @@ async function route(request, url, ip) {
   if (url.pathname.startsWith("/api/auth")) {
     return (await load(authApi)).default(request, context);
   }
+  if (url.pathname.startsWith("/api/admin")) {
+    return (await load(adminApi)).default(request, context);
+  }
   if (url.pathname === "/api/session") {
     return (await load(sessionApi)).default(request, context);
   }
   if (url.pathname.startsWith("/files/")) {
     return (await load(protectFiles)).default(request, context);
   }
-  if (url.pathname === "/" || url.pathname === "/index.html") {
+  /* /admin is gated the same way the hub is: signed out, you are sent
+     to sign in. Whether you may actually USE it is decided by
+     /api/admin/*, which re-checks on every request — the page itself
+     holds nothing worth protecting. */
+  if (["/", "/index.html", "/admin", "/admin.html"].includes(url.pathname)) {
     return (await load(protectApp)).default(request, context);
   }
   return serveStatic(url.pathname);
@@ -247,7 +257,11 @@ function toRequest(req, origin) {
   });
 }
 
-async function send(response, res) {
+async function send(response, res, { pathname = "/", secure = true } = {}) {
+  /* Reassigned, not just mutated: a redirect's headers are immutable,
+     so applySecurityHeaders hands back a rebuilt response for those. */
+  response = applySecurityHeaders(response, { pathname, secure });
+
   const headers = {};
   response.headers.forEach((value, key) => {
     if (key !== "set-cookie") headers[key] = value;
@@ -290,6 +304,15 @@ try {
 const { mailPreflight } = await load("netlify/edge-functions/lib/mailer.js");
 const mailNotes = await mailPreflight();
 
+/* What sign-up will ask for follows from the answer above, so it is
+   worked out here and printed — it is the first thing to check when
+   sign-up does not behave as expected. */
+const { signupPolicy } = await load(
+  "netlify/edge-functions/lib/providers/development-auth.js"
+);
+const { describeAdmins } = await load("netlify/edge-functions/lib/admins.js");
+const policy = await signupPolicy();
+
 const port = Number(process.env.PORT || 8888);
 
 const server = http.createServer(async (req, res) => {
@@ -301,7 +324,11 @@ const server = http.createServer(async (req, res) => {
     const ip = req.socket.remoteAddress || "127.0.0.1";
     const response = await route(request, url, ip);
     console.log("  " + req.method.padEnd(5), response.status, url.pathname);
-    await send(response, res);
+    /* Behind Plesk's nginx and Apache the connection to Node is plain
+       HTTP; X-Forwarded-Proto carries what the browser actually used. */
+    const secure =
+      req.headers["x-forwarded-proto"] === "https" || Boolean(req.socket.encrypted);
+    await send(response, res, { pathname: url.pathname, secure });
   } catch (err) {
     console.error("  " + req.method.padEnd(5), 500, url.pathname, err);
     res.writeHead(500, { "content-type": "text/plain" });
@@ -325,5 +352,13 @@ server.listen(port, () => {
     console.log("  mail     outbox off but Resend not configured — links will print here");
   }
   for (const note of mailNotes) console.log("  mail     " + note);
+  console.log("  admins   " + describeAdmins());
+  console.log(
+    "  sign-up  " +
+      (policy.emailVerification
+        ? "open to any @vts.edu address, confirmed by email"
+        : "by invitation — npm run account -- --invite someone@vts.edu") +
+      " (" + policy.source + ": " + policy.reason + ")"
+  );
   console.log("");
 });
